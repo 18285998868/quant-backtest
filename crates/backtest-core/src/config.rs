@@ -363,14 +363,6 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
         stop_loss: parse_risk_leg(raw.risk.stop_loss, "risk.stop_loss")?,
         take_profit: parse_risk_leg(raw.risk.take_profit, "risk.take_profit")?,
     };
-    if risk.stop_loss.is_some() || risk.take_profit.is_some() {
-        return Err(ConfigError::Unsupported {
-            what: "风控配置",
-            value: "止损/止盈".into(),
-            supported: "S1 暂不支持,将在 S2 实现",
-        }
-        .into());
-    }
 
     let strategy = parse_strategy(raw.strategy)?;
 
@@ -780,5 +772,46 @@ allow_short = false
             .replace("initial_cash = 100000.0", "initial_cash = 0.0");
         let error = load_text(&text).expect_err("must fail");
         assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+    }
+
+    #[test]
+    fn loads_risk_legs_and_hashes_them() {
+        let text = format!(
+            "{}\n[risk.stop_loss]\ntrigger = \"Intrabar\"\ndistance = 0.05\n\
+             [risk.take_profit]\ntrigger = \"close\"\ndistance = 0.10\n",
+            config_text("1d", ONE_INSTRUMENT)
+        );
+        let first = load_text(&text).expect("risk config");
+        let stop = first.risk.stop_loss.expect("stop");
+        let take_profit = first.risk.take_profit.expect("take profit");
+        assert_eq!(stop.trigger, Trigger::Intrabar);
+        assert!((stop.distance - 0.05).abs() < 1e-12);
+        assert_eq!(take_profit.trigger, Trigger::Close);
+        assert!((take_profit.distance - 0.10).abs() < 1e-12);
+
+        let changed = text.replace("distance = 0.05", "distance = 0.06");
+        let second = load_text(&changed).expect("changed risk config");
+        assert_ne!(first.config_hash, second.config_hash);
+    }
+
+    #[test]
+    fn rejects_invalid_risk_legs() {
+        for distance in ["0.0", "1.0", "-0.1"] {
+            let text = format!(
+                "{}\n[risk.stop_loss]\ntrigger = \"intrabar\"\ndistance = {distance}\n",
+                config_text("1d", ONE_INSTRUMENT)
+            );
+            let error = load_text(&text).expect_err("distance must fail");
+            assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+        }
+        let text = format!(
+            "{}\n[risk.stop_loss]\ntrigger = \"daily\"\ndistance = 0.05\n",
+            config_text("1d", ONE_INSTRUMENT)
+        );
+        let error = load_text(&text).expect_err("trigger must fail");
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::Unsupported { .. })
+        ));
     }
 }
