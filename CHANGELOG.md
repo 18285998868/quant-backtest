@@ -150,6 +150,6 @@
   `d9dc81d8...`、`da7521b2...`。
 - 改造后报告阶段不再抬高进程峰值;剩余约 413 MB 由归档规划阶段
   `plan_archive()` 的整段 `load_universe_reporting()` 主导。
-- 提交 `待补` 的干净克隆(与 `data-reader` 同级)通过
+- 提交 `5f4a963` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(175 个)与 `cargo build --release --locked`;
   大样本整段/分块复跑的 `result_hash`、`data_hash` 与工作副本一致。

@@ -117,13 +117,15 @@ walk-forward 与 sweep 冒烟与 M5 记录一致,说明报告流式化没有改�
 
 ## 干净克隆
 
-提交 `待补` 克隆到 `data-reader` 同级的 `qb-m6-clean`,
+提交 `5f4a963` 克隆到 `data-reader` 同级的 `qb-m6-clean`,
 用于确认 path 依赖与流式报告不依赖工作区残留:
 
 - `cargo test --workspace --locked`:175 个通过;
 - `cargo build --release --locked`:成功;
-- 1843200 bar 整段/分块复跑:`result_hash`、`data_hash` 与工作副本一致;
-- `fixtures/walkforward.toml` 与 `fixtures/sweep.toml` 的哈希与工作副本一致。
+- 1843200 bar 整段/分块复跑:`result_hash = f7026895...`、
+  `data_hash = 36ec7667...`,与工作副本一致;
+- `fixtures/walkforward.toml` 与 `fixtures/sweep.toml` 的哈希分别为
+  `4f0e7bd6...`、`41d11ac9...`,与工作副本一致。
 
 克隆目录保留为 `qb-m6-clean`,可用于后续检查。
 
