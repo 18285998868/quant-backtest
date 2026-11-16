@@ -11,7 +11,7 @@ output_dir = "out/sma"
 threads = "auto"
 # 0 表示自动检测
 memory_limit_gb = 0
-# S1 只实现 1d
+# S1/S2 只实现 1d
 timeframe = "1d"
 risk_free_rate = 0.0
 
@@ -26,6 +26,15 @@ slow = 3
 # 目标名义价值 / 权益
 weight = 0.99
 allow_short = false
+
+# 可选:止损/止盈,trigger 为 intrabar 或 close
+# [risk.stop_loss]
+# trigger = "intrabar"
+# distance = 0.05
+#
+# [risk.take_profit]
+# trigger = "close"
+# distance = 0.10
 
 [[instruments]]
 symbol = "TEST"
