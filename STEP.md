@@ -89,3 +89,4 @@ cargo run --release -- bench --scale
 - [07 S3 组合验收](./STEP.d/07-s3-acceptance.md)
 - [08 S4 扫描验收](./STEP.d/08-s4-acceptance.md)
 - [09 S5 指标与报告验收](./STEP.d/09-s5-acceptance.md)
+- [10 S6 健壮性与交付验收](./STEP.d/10-s6-acceptance.md)

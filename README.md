@@ -1,46 +1,56 @@
 # quant-backtest
 
-纯 Rust 的日线级、多标的、可做空策略回测引擎。
+纯 Rust 的日线级、多标的、可做空策略回测引擎,支持参数扫描与 walk-forward。
 
-- 当前阶段:S5 指标、报告与 walk-forward
+- 当前阶段:S6 健壮性与交付
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
 
+## 环境
+
+- Linux x86-64
+- Rust stable,最低版本见 [Cargo.toml](./Cargo.toml) 的 `rust-version`
+- 可选:`cargo-nextest`、`cargo-deny`、`cargo-audit` 用于完整门禁
+
 ## 构建
 
 ```bash
-cargo build --release
+cargo build --release --locked
 ```
 
-## 运行
+## 快速开始
 
 ```bash
-cargo run --release -- validate --config config/00.smoke.toml
-cargo run --release -- run --config config/00.smoke.toml
-cargo run --release -- run --config config/02.portfolio-smoke.toml
-cargo run --release -- sweep --config config/03.sweep.toml
-cargo run --release -- sweep --config fixtures/sweep.toml
-cargo run --release -- walkforward --config fixtures/walkforward.toml
-cargo run --release -- bench --scale
+cargo run --release --locked -- validate --config config/00.smoke.toml
+cargo run --release --locked -- run --config config/00.smoke.toml
+cargo run --release --locked -- run --config config/02.portfolio-smoke.toml
+cargo run --release --locked -- sweep --config fixtures/sweep.toml
+cargo run --release --locked -- walkforward --config fixtures/walkforward.toml
 ```
 
-`sweep` 与 `walkforward` 各自输出 `result.json` 与 `report.html`;
-`sweep` 另输出 `sweep.csv` 与 `sweep_summary.json`。报告为单文件离线 HTML,固定 10 章。
+`run` 输出 `result.json` 与 `report.html`;`sweep` 另输出 `sweep.csv` 与
+`sweep_summary.json`;`walkforward` 输出逐窗 OOS 结果。报告为单文件离线 HTML,
+固定 10 章,不依赖 CDN 或脚本。
 
-## 测试
+## 测试与门禁
 
 ```bash
-cargo test
-bash scripts/check.sh
+cargo test --workspace --locked
+bash scripts/check.sh --ci
 ```
+
+完整门禁包含 fmt、check、clippy、测试、doctest、rustdoc、deny、audit 与
+release 构建;`cargo audit` 需要访问 RustSec 公告库。
 
 ## 文档
 
 - [需求规格](./docs/01-需求规格.md)
 - [调研与决策](./docs/02-调研与决策.md)
 - [流程设计](./docs/03-流程设计.md)
+- [S6 验收](./STEP.d/10-s6-acceptance.md)
 
 ## 许可
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0。见 [LICENSE-MIT](./LICENSE-MIT)、
+[LICENSE-APACHE](./LICENSE-APACHE) 与 [THIRD_PARTY.md](./THIRD_PARTY.md)。

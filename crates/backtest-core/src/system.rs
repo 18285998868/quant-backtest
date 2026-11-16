@@ -86,14 +86,14 @@ pub fn resolve_workers(
     let mut warnings = Vec::new();
     let cpu_available = capacity.cpu_available.max(1);
     let memory_limit_bytes = match memory_limit_gb {
-        Some(value) if value > 0.0 => {
-            if !value.is_finite() {
-                return Err(ConfigError::Invalid {
-                    field: "memory_limit_gb".into(),
-                    message: "必须是有限数值".into(),
-                }
-                .into());
+        Some(value) if !value.is_finite() || value < 0.0 => {
+            return Err(ConfigError::Invalid {
+                field: "memory_limit_gb".into(),
+                message: "必须是有限且 >= 0 的数值".into(),
             }
+            .into());
+        }
+        Some(value) if value > 0.0 => {
             let bytes = value * GIB as f64;
             if bytes > u64::MAX as f64 {
                 return Err(ConfigError::Invalid {
@@ -106,6 +106,16 @@ pub fn resolve_workers(
         }
         _ => capacity.mem_available_bytes,
     };
+    if let (Some(requested), Some(available)) = (memory_limit_bytes, capacity.mem_available_bytes)
+        && memory_limit_gb.is_some_and(|value| value > 0.0)
+        && requested > available
+    {
+        warnings.push(format!(
+            "显式内存上限 {:.2} GiB 超过检测到的可用内存 {:.2} GiB,可能触发系统 OOM",
+            requested as f64 / GIB as f64,
+            available as f64 / GIB as f64
+        ));
+    }
     let reserve = memory_limit_bytes
         .map(|bytes| (bytes / 10).max(2 * GIB))
         .unwrap_or(0);
@@ -297,6 +307,56 @@ mod tests {
         let error =
             resolve_workers(None, None, &cap, DEFAULT_WORKER_BUDGET_BYTES).expect_err("must fail");
         assert!(error.to_string().contains("单 worker 预算"));
+    }
+
+    #[test]
+    fn invalid_memory_limit_is_a_config_error() {
+        for value in [-1.0, f64::NAN, f64::INFINITY] {
+            let error = resolve_workers(
+                None,
+                Some(value),
+                &capacity(2, 8),
+                DEFAULT_WORKER_BUDGET_BYTES,
+            )
+            .expect_err("invalid memory must fail");
+            let message = error.to_string();
+            assert!(message.contains("memory_limit_gb"), "{message}");
+            assert!(message.contains("有限"), "{message}");
+        }
+    }
+
+    #[test]
+    fn explicit_memory_above_detected_warns() {
+        let resolved = resolve_workers(
+            None,
+            Some(64.0),
+            &capacity(2, 8),
+            DEFAULT_WORKER_BUDGET_BYTES,
+        )
+        .expect("resolve");
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("超过检测到的可用内存")),
+            "{:?}",
+            resolved.warnings
+        );
+    }
+
+    #[test]
+    fn explicit_threads_above_cpu_warns() {
+        let resolved = resolve_workers(Some(8), None, &capacity(2, 8), DEFAULT_WORKER_BUDGET_BYTES)
+            .expect("resolve");
+        assert_eq!(resolved.threads, 8);
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("超过检测到的")),
+            "{:?}",
+            resolved.warnings
+        );
     }
 
     #[test]

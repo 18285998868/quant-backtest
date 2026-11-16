@@ -29,6 +29,10 @@
 - S5:walk-forward 纯函数与 `walkforward` 子命令,支持 rolling/anchored、embargo、warmup、OOS 拼接与参数稳定性。
 - S5:夹具 `fixtures/s5_daily.csv`、`fixtures/sweep.toml`、`fixtures/walkforward.toml`、`fixtures/report_case.json`。
 - S5:变更说明 `docs/changes/004-report-walkforward.md` 与验收文档 `STEP.d/09-s5-acceptance.md`。
+- S6:walk-forward 参数与窗口下标改用 checked 算术,极端配置返回 Config 错误而不是 panic。
+- S6:显式内存上限超过检测值时写入 warning;负数、NaN 与 Inf 在配置或 CLI 覆盖层拒绝。
+- S6:CLI 契约测试覆盖退出码 2/3、错误字段、零成交量合法、非法夹具与跨线程结果哈希。
+- S6:新增 `fixtures/invalid/*`、MIT/Apache-2.0 许可证、第三方依赖声明与 S6 验收文档。
 
 ### 验收
 
@@ -42,3 +46,9 @@
 - 2026-11-16:S4 验收,92 个测试、fmt、clippy、doc、deny/audit(离线)与 release 冒烟全部通过。
 - S4 扫描冒烟 27 组、18 有效、9 组非法跳过,`sweep_hash` 为 `3e92bf60...`,auto/1/2 线程一致。
 - S1/S2/S3 回归哈希保持不变:`144d1118...`、`8476c228...`、`8796ce7f...`。
+- 2026-11-16:S6 验收,130 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit 与 release build 全部通过。
+- 10 个非法数据夹具退出码 3,非法配置与 CLI 覆盖退出码 2,均含字段上下文且无 panic。
+- S1 冒烟 1/2 线程 `result_hash` 同为 `d771891d...`;S2/S3 回归哈希保持不变。
+- 干净克隆的测试、release 构建与 validate/run/portfolio/sweep/walkforward 全部成功;
+  sweep 与 walkforward 哈希分别为 `6edce9d9...`、`0bee99bb...`,与 S5 记录一致。
+- 密钥与个人绝对路径扫描无命中;`cargo audit` 扫描 101 个依赖无漏洞报告。

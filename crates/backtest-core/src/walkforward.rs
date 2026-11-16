@@ -74,6 +74,15 @@ pub struct WalkForwardResult {
     pub elapsed_ms: u128,
 }
 
+/// 窗口下标计算溢出时的统一配置错误。
+fn window_overflow() -> crate::error::Error {
+    ConfigError::Invalid {
+        field: "walk_forward".into(),
+        message: "窗口下标计算溢出,请减小 train_bars/test_bars/step_bars/embargo_bars".into(),
+    }
+    .into()
+}
+
 /// 按契约切分窗口。
 pub fn plan_windows(total_bars: usize, config: &WalkForwardConfig) -> Result<WindowPlan> {
     if config.test_bars == 0 || config.train_bars == 0 {
@@ -93,15 +102,30 @@ pub fn plan_windows(total_bars: usize, config: &WalkForwardConfig) -> Result<Win
     let mut plan = WindowPlan::default();
     let mut index = 0usize;
     loop {
+        let offset = index
+            .checked_mul(config.step_bars)
+            .ok_or_else(window_overflow)?;
         let (train_start, train_end) = match config.mode {
             WindowMode::Rolling => (
-                index * config.step_bars,
-                index * config.step_bars + config.train_bars,
+                offset,
+                offset
+                    .checked_add(config.train_bars)
+                    .ok_or_else(window_overflow)?,
             ),
-            WindowMode::Anchored => (0, config.train_bars + index * config.step_bars),
+            WindowMode::Anchored => (
+                0,
+                config
+                    .train_bars
+                    .checked_add(offset)
+                    .ok_or_else(window_overflow)?,
+            ),
         };
-        let test_start = train_end + config.embargo_bars;
-        let test_end = test_start + config.test_bars;
+        let test_start = train_end
+            .checked_add(config.embargo_bars)
+            .ok_or_else(window_overflow)?;
+        let test_end = test_start
+            .checked_add(config.test_bars)
+            .ok_or_else(window_overflow)?;
         if test_start >= total_bars {
             break;
         }
@@ -121,11 +145,15 @@ pub fn plan_windows(total_bars: usize, config: &WalkForwardConfig) -> Result<Win
         index += 1;
     }
     if plan.windows.is_empty() {
+        let required = config
+            .train_bars
+            .checked_add(config.embargo_bars)
+            .and_then(|value| value.checked_add(config.test_bars))
+            .ok_or_else(window_overflow)?;
         return Err(ConfigError::Invalid {
             field: "walk_forward".into(),
             message: format!(
-                "数据仅 {total_bars} 根 bar,不足以构成一个完整窗口(至少需要 {} 根)",
-                config.train_bars + config.embargo_bars + config.test_bars
+                "数据仅 {total_bars} 根 bar,不足以构成一个完整窗口(至少需要 {required} 根)"
             ),
         }
         .into());
@@ -267,6 +295,36 @@ mod tests {
         let plan = plan_windows(1100, &cfg).expect("plan");
         assert_eq!(plan.windows.len(), 1);
         assert_eq!(plan.skipped.len(), 1);
+    }
+
+    #[test]
+    fn zero_length_windows_are_rejected() {
+        let mut cfg = config(WindowMode::Rolling);
+        cfg.train_bars = 0;
+        assert!(plan_windows(400, &cfg).is_err());
+
+        let mut cfg = config(WindowMode::Rolling);
+        cfg.test_bars = 0;
+        assert!(plan_windows(400, &cfg).is_err());
+    }
+
+    #[test]
+    fn window_arithmetic_overflow_is_a_config_error() {
+        let mut cfg = config(WindowMode::Rolling);
+        cfg.train_bars = usize::MAX - 1;
+        cfg.test_bars = 2;
+        cfg.step_bars = 2;
+        cfg.embargo_bars = 2;
+        let error = plan_windows(400, &cfg).expect_err("overflow must fail");
+        assert!(error.to_string().contains("溢出"), "{error}");
+
+        let mut cfg = config(WindowMode::Rolling);
+        cfg.train_bars = usize::MAX / 2;
+        cfg.test_bars = usize::MAX / 2 + 2;
+        cfg.step_bars = cfg.test_bars;
+        cfg.embargo_bars = 0;
+        let error = plan_windows(400, &cfg).expect_err("required length overflow");
+        assert!(error.to_string().contains("溢出"), "{error}");
     }
 
     #[test]

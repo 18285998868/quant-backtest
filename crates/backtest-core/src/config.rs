@@ -1013,13 +1013,16 @@ fn parse_walk_forward(
     if warmup_bars == 0 {
         return Err(field("walk_forward.warmup_bars", "必须大于 0"));
     }
-    if warmup_bars > train_bars + embargo_bars {
+    let max_warmup = train_bars.checked_add(embargo_bars).ok_or_else(|| {
+        field(
+            "walk_forward.train_bars",
+            "train_bars + embargo_bars 超出可表示范围",
+        )
+    })?;
+    if warmup_bars > max_warmup {
         return Err(field(
             "walk_forward.warmup_bars",
-            &format!(
-                "不能超过 train_bars + embargo_bars = {}",
-                train_bars + embargo_bars
-            ),
+            &format!("不能超过 train_bars + embargo_bars = {max_warmup}"),
         ));
     }
     let strategy_warmup = strategy.warmup_bars();
@@ -1559,5 +1562,63 @@ gross = 0.9
         let nested = with_sweep("fast = [[1, 2]]");
         let error = load_text(&nested).expect_err("non-scalar grid value");
         assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+    }
+
+    fn with_walk_forward(body: &str) -> String {
+        format!(
+            "{}\n[walk_forward]\n{body}\n",
+            config_text("1d", ONE_INSTRUMENT)
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_walk_forward_sections() {
+        for (body, field_name) in [
+            (
+                "train_bars = 0\ntest_bars = 2\nstep_bars = 2\nwarmup_bars = 1",
+                "walk_forward.train_bars",
+            ),
+            (
+                "train_bars = 2\ntest_bars = 0\nstep_bars = 2\nwarmup_bars = 1",
+                "walk_forward.test_bars",
+            ),
+            (
+                "train_bars = 2\ntest_bars = 2\nstep_bars = 1\nwarmup_bars = 1",
+                "walk_forward.step_bars",
+            ),
+            (
+                "train_bars = 2\ntest_bars = 2\nstep_bars = 2\nwarmup_bars = 0",
+                "walk_forward.warmup_bars",
+            ),
+            (
+                "train_bars = 2\ntest_bars = 2\nstep_bars = 2\nembargo_bars = 1\nwarmup_bars = 5",
+                "walk_forward.warmup_bars",
+            ),
+        ] {
+            let error = load_text(&with_walk_forward(body)).expect_err("invalid walk_forward");
+            let message = error.to_string();
+            assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+            assert!(message.contains(field_name), "{message}");
+        }
+    }
+
+    #[test]
+    fn applies_documented_run_defaults() {
+        let text = config_text("1d", ONE_INSTRUMENT)
+            .replace("start = \"2020-01-01\"\n", "")
+            .replace("end = \"2020-02-01\"\n", "")
+            .replace("output_dir = \"out\"\n", "")
+            .replace("threads = \"auto\"\n", "")
+            .replace("memory_limit_gb = 0\n", "");
+        let config = load_text(&text).expect("defaults");
+        assert_eq!(config.output_dir, PathBuf::from("out"));
+        assert!(matches!(config.threads, ThreadSetting::Auto));
+        assert_eq!(config.memory_limit_gb, 0.0);
+        assert_eq!(config.risk_free_rate, 0.0);
+        assert_eq!(config.execution.participation_rate, 0.0);
+        assert!(config.risk.stop_loss.is_none());
+        assert!(config.risk.take_profit.is_none());
+        assert!(config.sweep.is_none());
+        assert!(config.walk_forward.is_none());
     }
 }
