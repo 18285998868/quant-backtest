@@ -932,7 +932,7 @@ periods_per_year = 365
             warnings: Vec::new(),
         };
         let universe = backtest_data::load_universe(&backtest_data::LoadOptions {
-            path: &config.data_path,
+            source: backtest_data::LoadSource::from(&config.data),
             timeframe: config.timeframe,
             instruments: &config.instruments,
             start: config.start,

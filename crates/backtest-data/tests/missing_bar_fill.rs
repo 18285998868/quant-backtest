@@ -6,7 +6,7 @@ use backtest_core::config::{ExecutionConfig, RiskConfig};
 use backtest_core::engine::{EngineInput, run_backtest};
 use backtest_core::model::{AssetClass, InstrumentSpec, Timeframe};
 use backtest_core::strategy::{MarketContext, Strategy, TargetPosition};
-use backtest_data::{LoadOptions, load_universe};
+use backtest_data::{LoadOptions, LoadSource, load_universe};
 
 const DAY: i64 = 86_400_000;
 const BASE_TS: i64 = 1_577_836_800_000;
@@ -73,7 +73,7 @@ fn missing_bar_fills_at_next_available_open() {
         periods_per_year: Some(365),
     };
     let universe = load_universe(&LoadOptions {
-        path: &path,
+        source: LoadSource::Csv(&path),
         timeframe: Timeframe::ONE_DAY,
         instruments: std::slice::from_ref(&spec),
         start: None,

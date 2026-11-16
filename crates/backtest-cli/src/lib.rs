@@ -16,7 +16,7 @@ use backtest_core::strategy::Strategy;
 use backtest_core::system::{
     Capacity, DEFAULT_WORKER_BUDGET_BYTES, ResolvedWorkers, detect_capacity, resolve_workers,
 };
-use backtest_data::{LoadOptions, load_universe};
+use backtest_data::{LoadOptions, LoadSource, load_universe_reporting};
 use backtest_report::{ReportExtras, ReportPaths, write_report};
 use backtest_strategy::{SmaCross, build};
 use chrono::{DateTime, Utc};
@@ -606,13 +606,17 @@ fn resolve_for_requested(
 }
 
 fn load(config: &RunConfig) -> Result<Universe> {
-    load_universe(&LoadOptions {
-        path: &config.data_path,
+    let (universe, diagnostics) = load_universe_reporting(&LoadOptions {
+        source: LoadSource::from(&config.data),
         timeframe: config.timeframe,
         instruments: &config.instruments,
         start: config.start,
         end: config.end,
-    })
+    })?;
+    for note in diagnostics.notes {
+        println!("数据源: {note}");
+    }
+    Ok(universe)
 }
 
 fn print_capacity(workers: &ResolvedWorkers) {

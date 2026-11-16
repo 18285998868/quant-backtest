@@ -4,12 +4,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "规范化日线 CSV 加载与校验"
+description = "规范 CSV 与 data-reader 归档加载、校验"
 
 [dependencies]
 backtest-core = { path = "../backtest-core", version = "0.1.0" }
+binance-core = { path = "../../../data-reader/crates/binance-core", version = "0.2.0" }
 chrono.workspace = true
 csv.workspace = true
+dukascopy-core = { path = "../../../data-reader/crates/dukascopy-core", version = "0.2.0" }
 sha2.workspace = true
 
 [dev-dependencies]

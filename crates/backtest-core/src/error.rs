@@ -83,6 +83,20 @@ pub enum DataError {
     },
     #[error("数据文件 {path} 为空")]
     Empty { path: PathBuf },
+    #[error("数据源 {provider} ({root}) 没有可用 bar")]
+    EmptyArchive {
+        provider: &'static str,
+        root: PathBuf,
+    },
+    #[error("读取 {provider} 归档失败 (root={root}, symbol={symbol}): {message}")]
+    Archive {
+        provider: &'static str,
+        root: PathBuf,
+        symbol: String,
+        message: String,
+    },
+    #[error("时间边界 {value} 毫秒超出可表示的 UTC 日期范围")]
+    TimestampRange { value: i64 },
     #[error("标的 {symbol} 时间线与其他标的不一致:期望 ts={expected:?},实际 ts={actual:?}")]
     TimelineMismatch {
         symbol: String,

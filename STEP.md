@@ -6,6 +6,7 @@
 
 - 二进制:`quant-backtest`
 - 配置:`run.toml`(见 `config/00.example.toml`)
+- 归档数据源:`[source]` 段,与 `run.data` 二选一(见 [流程设计 §3.1](./docs/03-流程设计.md))
 - 冒烟配置:`config/00.smoke.toml`
 - 风控冒烟:`config/01.risk-smoke.toml`
 - 组合冒烟:`config/02.portfolio-smoke.toml`
@@ -32,7 +33,7 @@
 CLI
   -> 读取 TOML,校验并类型化
   -> 检测 CPU/内存,解析线程数
-  -> 加载 CSV,校验 schema/排序/OHLC/时间线
+  -> 加载 CSV 或 data-reader 归档,校验 schema/排序/OHLC/时间线
   -> 构造策略
   -> 逐 bar: 开盘成交 -> 收盘估值 -> 策略信号 -> 下一根订单
   -> 指标/回撤/月度
@@ -81,6 +82,9 @@ cargo run --release -- walkforward --config fixtures/walkforward.toml
 cargo run --release -- bench --scale
 ```
 
+直连 Binance/Dukascopy 归档时,把配置中的 `run.data` 换成顶层 `[source]`;
+验收证据见 [M2 归档数据源](./STEP.d/12-archive-source.md)。
+
 ## 步骤
 
 - [00 总览](./STEP.d/00-overview.md)
@@ -95,3 +99,4 @@ cargo run --release -- bench --scale
 - [09 S5 指标与报告验收](./STEP.d/09-s5-acceptance.md)
 - [10 S6 健壮性与交付验收](./STEP.d/10-s6-acceptance.md)
 - [11 M1 多周期验收](./STEP.d/11-m1-acceptance.md)
+- [12 M2 归档数据源验收](./STEP.d/12-archive-source.md)

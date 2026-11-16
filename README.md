@@ -1,8 +1,8 @@
 # quant-backtest
 
-纯 Rust 的多周期、多标的、可做空策略回测引擎,支持参数扫描与 walk-forward。
+纯 Rust 的多周期、多标的、可做空策略回测引擎,支持直接读取 Binance/Dukascopy 归档,参数扫描与 walk-forward。
 
-- 当前阶段:M1 多周期
+- 当前阶段:M2 归档数据源
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -11,7 +11,16 @@
 
 - Linux x86-64
 - Rust stable,最低版本见 [Cargo.toml](./Cargo.toml) 的 `rust-version`
+- 数据源二选一:规范 CSV,或与 `data-reader` 同级克隆后直连归档
 - 可选:`cargo-nextest`、`cargo-deny`、`cargo-audit` 用于完整门禁
+
+归档直连通过 path 依赖引入 `data-reader` 的 crate,要求两个仓库位于同一父目录:
+
+```text
+workspace/
+├── data-reader/
+└── quant-backtest/
+```
 
 ## 构建
 
@@ -35,6 +44,9 @@ cargo run --release --locked -- walkforward --config fixtures/walkforward.toml
 `sweep_summary.json`;`walkforward` 输出逐窗 OOS 结果。报告为单文件离线 HTML,
 固定 10 章,不依赖 CDN 或脚本。
 
+直连归档时把 `run.data` 换成顶层 `[source]`(Binance/Dukascopy),配置与
+时间戳语义见 [流程设计 §3.1 与 §3.7](./docs/03-流程设计.md)。
+
 ## 测试与门禁
 
 ```bash
@@ -52,6 +64,7 @@ release 构建;`cargo audit` 需要访问 RustSec 公告库。
 - [流程设计](./docs/03-流程设计.md)
 - [S6 验收](./STEP.d/10-s6-acceptance.md)
 - [M1 多周期验收](./STEP.d/11-m1-acceptance.md)
+- [M2 归档数据源验收](./STEP.d/12-archive-source.md)
 
 ## 许可
 

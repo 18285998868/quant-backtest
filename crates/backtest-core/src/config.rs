@@ -360,9 +360,134 @@ pub struct WalkForwardConfig {
     pub objective: Objective,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinanceMarket {
+    Spot,
+    Um,
+    Cm,
+}
+
+impl BinanceMarket {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "spot" => Ok(Self::Spot),
+            "futures/um" | "um" => Ok(Self::Um),
+            "futures/cm" | "cm" => Ok(Self::Cm),
+            other => Err(ConfigError::Unsupported {
+                what: "binance 市场",
+                value: other.to_string(),
+                supported: "spot, futures/um, futures/cm",
+            }
+            .into()),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spot => "spot",
+            Self::Um => "futures/um",
+            Self::Cm => "futures/cm",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DukascopyPrice {
+    Bid,
+    Ask,
+}
+
+impl DukascopyPrice {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "bid" => Ok(Self::Bid),
+            "ask" => Ok(Self::Ask),
+            other => Err(ConfigError::Unsupported {
+                what: "dukascopy 报价侧",
+                value: other.to_string(),
+                supported: "bid, ask",
+            }
+            .into()),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bid => "BID",
+            Self::Ask => "ASK",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinanceSource {
+    pub root: PathBuf,
+    pub market: BinanceMarket,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DukascopySource {
+    pub root: PathBuf,
+    pub price_type: DukascopyPrice,
+}
+
+/// `data-reader` 的归档数据源。归档格式与字段由上游模块负责。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceConfig {
+    Binance(BinanceSource),
+    Dukascopy(DukascopySource),
+}
+
+impl SourceConfig {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Binance(_) => "binance",
+            Self::Dukascopy(_) => "dukascopy",
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        match self {
+            Self::Binance(source) => &source.root,
+            Self::Dukascopy(source) => &source.root,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Binance(source) => format!(
+                "binance {}: {}",
+                source.market.as_str(),
+                source.root.display()
+            ),
+            Self::Dukascopy(source) => format!(
+                "dukascopy {}: {}",
+                source.price_type.as_str(),
+                source.root.display()
+            ),
+        }
+    }
+}
+
+/// 一次回测的数据入口:规范 CSV 或归档模块。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataInput {
+    Csv(PathBuf),
+    Archive(SourceConfig),
+}
+
+impl DataInput {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Csv(path) => format!("csv: {}", path.display()),
+            Self::Archive(source) => source.describe(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RunConfig {
-    pub data_path: PathBuf,
+    pub data: DataInput,
     pub initial_cash: f64,
     pub start: Option<Ts>,
     pub end: Option<Ts>,
@@ -460,6 +585,8 @@ impl RunConfig {
 struct RawConfig {
     run: RawRun,
     #[serde(default)]
+    source: Option<RawSource>,
+    #[serde(default)]
     execution: RawExecution,
     #[serde(default)]
     risk: RawRisk,
@@ -475,7 +602,8 @@ struct RawConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRun {
-    data: String,
+    #[serde(default)]
+    data: Option<String>,
     initial_cash: f64,
     #[serde(default)]
     start: Option<String>,
@@ -490,6 +618,17 @@ struct RawRun {
     timeframe: String,
     #[serde(default)]
     risk_free_rate: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSource {
+    kind: String,
+    root: String,
+    #[serde(default)]
+    market: Option<String>,
+    #[serde(default)]
+    price_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -632,10 +771,9 @@ pub fn load_config(path: &Path) -> Result<RunConfig> {
     validate(raw)
 }
 
-fn validate(raw: RawConfig) -> Result<RunConfig> {
-    if raw.run.data.trim().is_empty() {
-        return Err(field("run.data", "不能为空"));
-    }
+fn validate(mut raw: RawConfig) -> Result<RunConfig> {
+    let timeframe = Timeframe::parse(&raw.run.timeframe)?;
+    let data = parse_data_input(raw.run.data.take(), raw.source.take(), timeframe)?;
     if !raw.run.initial_cash.is_finite() || raw.run.initial_cash <= 0.0 {
         return Err(field("run.initial_cash", "必须是有限且 > 0 的数值"));
     }
@@ -649,7 +787,6 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
     if !memory_limit_gb.is_finite() || memory_limit_gb < 0.0 {
         return Err(field("run.memory_limit_gb", "必须是有限且 >= 0 的数值"));
     }
-    let timeframe = Timeframe::parse(&raw.run.timeframe)?;
     let start = raw
         .run
         .start
@@ -805,7 +942,7 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
     })?;
 
     Ok(RunConfig {
-        data_path: PathBuf::from(raw.run.data),
+        data,
         initial_cash: raw.run.initial_cash,
         start,
         end,
@@ -822,6 +959,102 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
         walk_forward,
         config_hash,
     })
+}
+
+fn parse_data_input(
+    csv: Option<String>,
+    source: Option<RawSource>,
+    timeframe: Timeframe,
+) -> Result<DataInput> {
+    match (csv, source) {
+        (Some(path), None) => {
+            if path.trim().is_empty() {
+                return Err(field("run.data", "不能为空"));
+            }
+            Ok(DataInput::Csv(PathBuf::from(path)))
+        }
+        (None, Some(raw)) => Ok(DataInput::Archive(parse_source(raw, timeframe)?)),
+        (Some(_), Some(_)) => Err(field("source", "与 run.data 只能二选一")),
+        (None, None) => Err(field(
+            "run.data",
+            "缺少数据源:填写 run.data 或增加 [source] 段",
+        )),
+    }
+}
+
+fn parse_source(raw: RawSource, timeframe: Timeframe) -> Result<SourceConfig> {
+    if raw.root.trim().is_empty() {
+        return Err(field("source.root", "不能为空"));
+    }
+    let root = PathBuf::from(raw.root);
+    match raw.kind.trim().to_ascii_lowercase().as_str() {
+        "binance" => {
+            if raw.price_type.is_some() {
+                return Err(field("source.price_type", "仅适用于 dukascopy 数据源"));
+            }
+            let market = raw
+                .market
+                .ok_or_else(|| field("source.market", "binance 数据源必须指定 market"))?;
+            ensure_source_timeframe(
+                "binance",
+                timeframe,
+                &BINANCE_TIMEFRAMES,
+                "binance: 1m/3m/5m/15m/30m/1h/2h/4h/6h/8h/12h/1d/3d/1w",
+            )?;
+            Ok(SourceConfig::Binance(BinanceSource {
+                root,
+                market: BinanceMarket::parse(&market)?,
+            }))
+        }
+        "dukascopy" => {
+            if raw.market.is_some() {
+                return Err(field("source.market", "仅适用于 binance 数据源"));
+            }
+            let price_type = match raw.price_type {
+                Some(text) => DukascopyPrice::parse(&text)?,
+                None => DukascopyPrice::Bid,
+            };
+            ensure_source_timeframe(
+                "dukascopy",
+                timeframe,
+                &DUKASCOPY_TIMEFRAMES,
+                "dukascopy: 1m/1h/1d",
+            )?;
+            Ok(SourceConfig::Dukascopy(DukascopySource {
+                root,
+                price_type,
+            }))
+        }
+        other => Err(ConfigError::Unsupported {
+            what: "数据源",
+            value: other.to_string(),
+            supported: "binance, dukascopy",
+        }
+        .into()),
+    }
+}
+
+const BINANCE_TIMEFRAMES: [&str; 14] = [
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w",
+];
+const DUKASCOPY_TIMEFRAMES: [&str; 3] = ["1m", "1h", "1d"];
+
+fn ensure_source_timeframe(
+    provider: &str,
+    timeframe: Timeframe,
+    allowed: &[&str],
+    supported: &'static str,
+) -> Result<()> {
+    let text = timeframe.to_string();
+    if allowed.contains(&text.as_str()) {
+        return Ok(());
+    }
+    Err(ConfigError::Unsupported {
+        what: "数据源周期",
+        value: format!("{provider} {text}"),
+        supported,
+    }
+    .into())
 }
 
 fn parse_strategy(raw: RawStrategy) -> Result<StrategyConfig> {
@@ -1327,6 +1560,121 @@ allow_short = false
             let config = load_text(&config_text(raw, ONE_INSTRUMENT)).expect(raw);
             assert_eq!(config.timeframe.to_string(), raw);
         }
+    }
+
+    fn source_text(timeframe: &str, source: &str) -> String {
+        let base = config_text(timeframe, ONE_INSTRUMENT).replace("data = \"bars.csv\"\n", "");
+        format!("{base}\n{source}\n")
+    }
+
+    #[test]
+    fn parses_binance_source_without_csv_path() {
+        let text = source_text(
+            "1h",
+            r#"[source]
+kind = "binance"
+root = "../data/binance"
+market = "spot"
+"#,
+        );
+        let config = load_text(&text).expect("config");
+        match &config.data {
+            DataInput::Archive(SourceConfig::Binance(source)) => {
+                assert_eq!(source.root, PathBuf::from("../data/binance"));
+                assert_eq!(source.market, BinanceMarket::Spot);
+            }
+            other => panic!("unexpected data input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dukascopy_source_and_defaults_to_bid() {
+        let text = source_text(
+            "1d",
+            r#"[source]
+kind = "dukascopy"
+root = "../data"
+"#,
+        );
+        let config = load_text(&text).expect("config");
+        match &config.data {
+            DataInput::Archive(SourceConfig::Dukascopy(source)) => {
+                assert_eq!(source.price_type, DukascopyPrice::Bid);
+            }
+            other => panic!("unexpected data input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_csv_and_source_together() {
+        let text = format!(
+            "{}\n[source]\nkind = \"binance\"\nroot = \"archive\"\nmarket = \"spot\"\n",
+            config_text("1d", ONE_INSTRUMENT)
+        );
+        let error = load_text(&text).expect_err("must fail");
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::Invalid { ref field, .. }) if field == "source"
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_data_source() {
+        let text = config_text("1d", ONE_INSTRUMENT).replace("data = \"bars.csv\"\n", "");
+        let error = load_text(&text).expect_err("must fail");
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::Invalid { ref field, .. }) if field == "run.data"
+        ));
+    }
+
+    #[test]
+    fn rejects_source_provider_field_mismatch() {
+        for source in [
+            "[source]\nkind = \"binance\"\nroot = \"archive\"\nmarket = \"spot\"\nprice_type = \"BID\"\n",
+            "[source]\nkind = \"dukascopy\"\nroot = \"archive\"\nmarket = \"spot\"\n",
+        ] {
+            let text = source_text("1d", source);
+            let error = load_text(&text).expect_err("must fail");
+            assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+        }
+    }
+
+    #[test]
+    fn rejects_source_timeframe_not_published() {
+        let binance = source_text(
+            "2d",
+            "[source]\nkind = \"binance\"\nroot = \"archive\"\nmarket = \"spot\"\n",
+        );
+        assert!(matches!(
+            load_text(&binance).expect_err("must fail"),
+            Error::Config(ConfigError::Unsupported { what, .. }) if what == "数据源周期"
+        ));
+        let dukascopy = source_text("4h", "[source]\nkind = \"dukascopy\"\nroot = \"archive\"\n");
+        assert!(matches!(
+            load_text(&dukascopy).expect_err("must fail"),
+            Error::Config(ConfigError::Unsupported { what, .. }) if what == "数据源周期"
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_source_kind_or_field() {
+        let kind = source_text(
+            "1d",
+            "[source]\nkind = \"kraken\"\nroot = \"archive\"\nmarket = \"spot\"\n",
+        );
+        assert!(matches!(
+            load_text(&kind).expect_err("must fail"),
+            Error::Config(ConfigError::Unsupported { what, .. }) if what == "数据源"
+        ));
+        let field = source_text(
+            "1d",
+            "[source]\nkind = \"binance\"\nroot = \"archive\"\nmarket = \"spot\"\npath = \"x\"\n",
+        );
+        assert!(matches!(
+            load_text(&field).expect_err("must fail"),
+            Error::Config(ConfigError::ParseToml { .. })
+        ));
     }
 
     #[test]

@@ -1,3 +1,9 @@
+//! 回测数据装载:规范 CSV 与 `data-reader` 归档。
+//!
+//! 两种入口最终都归一成同一条 `RawBar` 流,由 `finalize` 统一做区间过滤、
+//! 时间线校验与 `data_hash` 计算,因此同一份内容无论来自 CSV 还是归档都得到
+//! 相同哈希。
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -5,36 +11,78 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use csv::StringRecord;
 use sha2::{Digest, Sha256};
 
+use backtest_core::config::{DataInput, SourceConfig};
 use backtest_core::error::{DataError, Result};
 use backtest_core::model::{BarSeries, InstrumentSpec, Timeframe, Ts, Universe};
 
+mod archive;
+
+/// 一次装载的数据入口。
+#[derive(Clone, Copy, Debug)]
+pub enum LoadSource<'a> {
+    /// 规范 CSV 文件。
+    Csv(&'a Path),
+    /// `data-reader` 归档目录。
+    Archive(&'a SourceConfig),
+}
+
+impl<'a> From<&'a DataInput> for LoadSource<'a> {
+    fn from(input: &'a DataInput) -> Self {
+        match input {
+            DataInput::Csv(path) => Self::Csv(path),
+            DataInput::Archive(source) => Self::Archive(source),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct LoadOptions<'a> {
-    pub path: &'a Path,
+    pub source: LoadSource<'a>,
     pub timeframe: Timeframe,
     pub instruments: &'a [InstrumentSpec],
     pub start: Option<Ts>,
     pub end: Option<Ts>,
 }
 
-struct RawBar {
-    symbol: String,
-    ts: Ts,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: f64,
+/// 装载过程中产生的诊断信息,供 CLI 打印。
+#[derive(Clone, Debug, Default)]
+pub struct LoadDiagnostics {
+    pub notes: Vec<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct RawBar {
+    pub symbol: String,
+    pub ts: Ts,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+}
+
+/// 只返回数据本身,丢弃诊断信息。
 pub fn load_universe(options: &LoadOptions<'_>) -> Result<Universe> {
-    let path = options.path;
+    load_universe_reporting(options).map(|(universe, _)| universe)
+}
+
+/// 装载并返回数据与诊断信息。
+pub fn load_universe_reporting(options: &LoadOptions<'_>) -> Result<(Universe, LoadDiagnostics)> {
     if options.instruments.is_empty() {
-        return Err(DataError::Empty {
-            path: path.to_path_buf(),
-        }
-        .into());
+        let path = match options.source {
+            LoadSource::Csv(path) => path.to_path_buf(),
+            LoadSource::Archive(source) => source.root().to_path_buf(),
+        };
+        return Err(DataError::Empty { path }.into());
     }
+    let (bars, diagnostics) = match options.source {
+        LoadSource::Csv(path) => (read_csv(path)?, LoadDiagnostics::default()),
+        LoadSource::Archive(source) => archive::load(options, source)?,
+    };
+    finalize(options, bars, diagnostics)
+}
+
+fn read_csv(path: &Path) -> Result<Vec<RawBar>> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
@@ -95,50 +143,64 @@ pub fn load_universe(options: &LoadOptions<'_>) -> Result<Universe> {
         }
         .into());
     }
+    Ok(bars)
+}
+
+fn finalize(
+    options: &LoadOptions<'_>,
+    bars: Vec<RawBar>,
+    diagnostics: LoadDiagnostics,
+) -> Result<(Universe, LoadDiagnostics)> {
+    if bars.is_empty() {
+        return Err(match options.source {
+            LoadSource::Csv(path) => DataError::Empty {
+                path: path.to_path_buf(),
+            },
+            LoadSource::Archive(source) => DataError::EmptyArchive {
+                provider: source.kind(),
+                root: source.root().to_path_buf(),
+            },
+        }
+        .into());
+    }
 
     let start = options.start.unwrap_or(i64::MIN);
     let end = options.end.unwrap_or(i64::MAX);
     let mut by_symbol: BTreeMap<String, Vec<RawBar>> = BTreeMap::new();
+    let mut last_by_symbol: BTreeMap<String, Ts> = BTreeMap::new();
     for bar in bars {
-        if bar.ts < start || bar.ts >= end {
-            continue;
+        if let Some(previous) = last_by_symbol.get(&bar.symbol) {
+            if bar.ts == *previous {
+                return Err(DataError::Duplicate {
+                    symbol: bar.symbol,
+                    ts: bar.ts,
+                }
+                .into());
+            }
+            if bar.ts < *previous {
+                return Err(DataError::Unsorted {
+                    symbol: bar.symbol,
+                    ts: bar.ts,
+                }
+                .into());
+            }
         }
+        last_by_symbol.insert(bar.symbol.clone(), bar.ts);
         by_symbol.entry(bar.symbol.clone()).or_default().push(bar);
-    }
-
-    let mut series_by_symbol: BTreeMap<String, BarSeries> = BTreeMap::new();
-    for (symbol, items) in by_symbol {
-        if items.is_empty() {
-            continue;
-        }
-        let mut series = BarSeries {
-            symbol: 0,
-            ts: Vec::with_capacity(items.len()),
-            open: Vec::with_capacity(items.len()),
-            high: Vec::with_capacity(items.len()),
-            low: Vec::with_capacity(items.len()),
-            close: Vec::with_capacity(items.len()),
-            volume: Vec::with_capacity(items.len()),
-        };
-        for bar in items {
-            series.ts.push(bar.ts);
-            series.open.push(bar.open);
-            series.high.push(bar.high);
-            series.low.push(bar.low);
-            series.close.push(bar.close);
-            series.volume.push(bar.volume);
-        }
-        series_by_symbol.insert(symbol, series);
     }
 
     let mut series = Vec::with_capacity(options.instruments.len());
     for (symbol_id, spec) in options.instruments.iter().enumerate() {
-        let Some(mut item) = series_by_symbol.remove(&spec.symbol) else {
+        let Some(item) = by_symbol.remove(&spec.symbol) else {
             return Err(DataError::MissingSymbolData {
                 symbol: spec.symbol.clone(),
             }
             .into());
         };
+        let item = item
+            .into_iter()
+            .filter(|bar| bar.ts >= start && bar.ts < end)
+            .collect::<Vec<_>>();
         if item.is_empty() {
             return Err(DataError::EmptyRange {
                 symbol: spec.symbol.clone(),
@@ -147,10 +209,26 @@ pub fn load_universe(options: &LoadOptions<'_>) -> Result<Universe> {
             }
             .into());
         }
-        item.symbol = symbol_id as u32;
-        series.push(item);
+        let mut result = BarSeries {
+            symbol: symbol_id as u32,
+            ts: Vec::with_capacity(item.len()),
+            open: Vec::with_capacity(item.len()),
+            high: Vec::with_capacity(item.len()),
+            low: Vec::with_capacity(item.len()),
+            close: Vec::with_capacity(item.len()),
+            volume: Vec::with_capacity(item.len()),
+        };
+        for bar in item {
+            result.ts.push(bar.ts);
+            result.open.push(bar.open);
+            result.high.push(bar.high);
+            result.low.push(bar.low);
+            result.close.push(bar.close);
+            result.volume.push(bar.volume);
+        }
+        series.push(result);
     }
-    if let Some((symbol, _)) = series_by_symbol.into_iter().next() {
+    if let Some((symbol, _)) = by_symbol.into_iter().next() {
         return Err(DataError::UnknownSymbol { symbol }.into());
     }
 
@@ -185,13 +263,16 @@ pub fn load_universe(options: &LoadOptions<'_>) -> Result<Universe> {
     }
 
     let data_hash = compute_data_hash(&series, options.instruments);
-    Ok(Universe {
-        timeframe: options.timeframe,
-        specs: options.instruments.to_vec(),
-        series,
-        timeline,
-        data_hash,
-    })
+    Ok((
+        Universe {
+            timeframe: options.timeframe,
+            specs: options.instruments.to_vec(),
+            series,
+            timeline,
+            data_hash,
+        },
+        diagnostics,
+    ))
 }
 
 struct Columns {
@@ -254,43 +335,12 @@ fn parse_record(record: &StringRecord, columns: &Columns, path: &Path, row: u64)
     let low = parse_number(record.get(columns.low), path, row, "low")?;
     let close = parse_number(record.get(columns.close), path, row, "close")?;
     let volume = parse_number(record.get(columns.volume), path, row, "volume")?;
-    if !(open.is_finite() && high.is_finite() && low.is_finite() && close.is_finite()) {
-        return Err(DataError::Ohlc {
-            symbol,
-            ts,
-            message: "价格必须是有限值".into(),
-        }
-        .into());
-    }
-    if open <= 0.0 || high <= 0.0 || low <= 0.0 || close <= 0.0 {
-        return Err(DataError::Ohlc {
-            symbol,
-            ts,
-            message: "价格必须 > 0".into(),
-        }
-        .into());
-    }
+    validate_ohlc(&symbol, ts, open, high, low, close)?;
     if !volume.is_finite() || volume < 0.0 {
         return Err(DataError::InvalidRow {
             path: path.to_path_buf(),
             row,
             message: "volume 必须是有限且 >= 0 的数值".into(),
-        }
-        .into());
-    }
-    if high < open.max(close).max(low) {
-        return Err(DataError::Ohlc {
-            symbol,
-            ts,
-            message: format!("high={high} 小于 max(open, close, low)"),
-        }
-        .into());
-    }
-    if low > open.min(close).min(high) {
-        return Err(DataError::Ohlc {
-            symbol,
-            ts,
-            message: format!("low={low} 大于 min(open, close, high)"),
         }
         .into());
     }
@@ -303,6 +353,49 @@ fn parse_record(record: &StringRecord, columns: &Columns, path: &Path, row: u64)
         close,
         volume,
     })
+}
+
+pub(crate) fn validate_ohlc(
+    symbol: &str,
+    ts: Ts,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+) -> Result<()> {
+    if !(open.is_finite() && high.is_finite() && low.is_finite() && close.is_finite()) {
+        return Err(DataError::Ohlc {
+            symbol: symbol.to_string(),
+            ts,
+            message: "价格必须是有限值".into(),
+        }
+        .into());
+    }
+    if open <= 0.0 || high <= 0.0 || low <= 0.0 || close <= 0.0 {
+        return Err(DataError::Ohlc {
+            symbol: symbol.to_string(),
+            ts,
+            message: "价格必须 > 0".into(),
+        }
+        .into());
+    }
+    if high < open.max(close).max(low) {
+        return Err(DataError::Ohlc {
+            symbol: symbol.to_string(),
+            ts,
+            message: format!("high={high} 小于 max(open, close, low)"),
+        }
+        .into());
+    }
+    if low > open.min(close).min(high) {
+        return Err(DataError::Ohlc {
+            symbol: symbol.to_string(),
+            ts,
+            message: format!("low={low} 大于 min(open, close, high)"),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn parse_number(raw: Option<&str>, path: &Path, row: u64, column: &str) -> Result<f64> {
@@ -401,7 +494,7 @@ mod tests {
 
     fn load<'a>(path: &'a Path, instruments: &'a [InstrumentSpec]) -> Result<Universe> {
         load_universe(&LoadOptions {
-            path,
+            source: LoadSource::Csv(path),
             timeframe: Timeframe::ONE_DAY,
             instruments,
             start: None,
@@ -519,7 +612,7 @@ mod tests {
         body.push_str(&row(2, "AAA", 100.0, 101.0, 99.0, 100.0));
         let path = write_csv(dir.path(), "bars.csv", &body);
         let universe = load_universe(&LoadOptions {
-            path: &path,
+            source: LoadSource::Csv(&path),
             timeframe: Timeframe::ONE_DAY,
             instruments: &[spec("AAA")],
             start: Some(BASE_TS + DAY),
@@ -528,5 +621,22 @@ mod tests {
         .expect("load");
         assert_eq!(universe.len(), 1);
         assert_eq!(universe.timeline[0], BASE_TS + DAY);
+    }
+
+    #[test]
+    fn reports_empty_range_for_symbol_without_bars_in_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut body = HEADER.to_string();
+        body.push_str(&row(0, "AAA", 100.0, 101.0, 99.0, 100.0));
+        let path = write_csv(dir.path(), "bars.csv", &body);
+        let error = load_universe(&LoadOptions {
+            source: LoadSource::Csv(&path),
+            timeframe: Timeframe::ONE_DAY,
+            instruments: &[spec("AAA")],
+            start: Some(BASE_TS + 2 * DAY),
+            end: Some(BASE_TS + 3 * DAY),
+        })
+        .expect_err("must fail");
+        assert!(matches!(error, Error::Data(DataError::EmptyRange { .. })));
     }
 }

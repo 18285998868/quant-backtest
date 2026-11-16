@@ -39,6 +39,10 @@
 - M1:CLI 输出数据常驻内存估算,超过内存上限时告警。
 - M1:新增 `fixtures/intraday_1h.csv`、`fixtures/weekly.csv`、`config/04.intraday.toml`、`config/05.weekly.toml`。
 - M1:新增 `timeframe_contract` 集成测试与 `STEP.d/11-m1-acceptance.md`。
+- M2:新增顶层 `[source]`,直接读取 Binance spot/UM/CM klines 与 Dukascopy bid/ask 的 `1m/1h/1d`,与 `run.data` 二选一。
+- M2:归档时间戳统一转换为 bar 收盘时刻;日期窗口前移一个周期,避免跨日/跨周 bar 丢失;缺失文件只进入诊断。
+- M2:`backtest-data` 通过 path 依赖同级 `data-reader`,CSV 与归档共用时间线校验和 `data_hash`;CLI 打印 `数据源:` 摘要。
+- M2:新增 `STEP.d/12-archive-source.md`、`docs/changes/006-archive-source.md`;`deny.toml` 允许 Zlib。
 
 ### 验收
 
@@ -58,6 +62,10 @@
 - 干净克隆的测试、release 构建与 validate/run/portfolio/sweep/walkforward 全部成功;
   sweep 与 walkforward 哈希分别为 `6edce9d9...`、`0bee99bb...`,与 S5 记录一致。
 - 密钥与个人绝对路径扫描无命中;`cargo audit` 扫描 101 个依赖无漏洞报告。
+- 2026-11-16:M2 验收,151 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit 与 release 构建全部通过。
+- Binance BTCUSDT 1h 归档与等价 CSV 的 `data_hash`、`result_hash` 完全一致;
+  1m 2023-06 为 43200 根,4 标的 1h 组合为 744 根,Dukascopy EURUSD H1 为 743 根。
+- M2 归档冒烟 1/2 线程与重复运行 `result_hash` 一致;`cargo audit` 扫描 131 个依赖无漏洞报告。
 - 2026-11-16:M1 验收,138 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release build 与 `scripts/check.sh --ci` 全部通过。
 - 1h 冒烟 `result_hash` 为 `68707c00...`,年化因子 8760,2 笔交易;1w 冒烟 `result_hash` 为 `fee172be...`,年化因子 52。
 - 1h 扫描 `sweep_hash` 为 `359ad35d...`(4 组/3 有效/1 跳过),walk-forward `result_hash` 为 `ca243a95...`(2 窗口/2 跳过)。
