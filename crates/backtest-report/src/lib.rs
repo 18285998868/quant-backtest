@@ -2,16 +2,18 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::{BufWriter, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 use backtest_core::error::{ReportError, Result};
 use backtest_core::model::{
-    BacktestResult, DeflatedSharpe, DrawdownEpisode, EquityPoint, FillReason, FundingSummary,
-    Metrics, MonthlyReturn, Side, TradeRecord, Ts,
+    BacktestResult, DeflatedSharpe, DrawdownEpisode, EquityPoint, FillReason, FillRecord,
+    FundingSummary, Metrics, MonthlyReturn, RunMeta, Side, SymbolFunding, TradeRecord, Ts,
 };
 use backtest_core::walkforward::WalkForwardResult;
 use chrono::DateTime;
-use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -190,8 +192,9 @@ pub fn write_report(
     })?;
     let json_path = output_dir.join("result.json");
     let html_path = output_dir.join("report.html");
-    write_json(result, extras, &json_path)?;
-    write_html(result, extras, &html_path)?;
+    let result_hash = content_hash(result)?;
+    write_json_with_hash(result, extras, &json_path, &result_hash)?;
+    write_html_with_hash(result, extras, &html_path, &result_hash)?;
     Ok(ReportPaths {
         json: json_path,
         html: html_path,
@@ -200,6 +203,15 @@ pub fn write_report(
 
 pub fn write_json(result: &BacktestResult, extras: &ReportExtras, path: &Path) -> Result<()> {
     let result_hash = content_hash(result)?;
+    write_json_with_hash(result, extras, path, &result_hash)
+}
+
+fn write_json_with_hash(
+    result: &BacktestResult,
+    extras: &ReportExtras,
+    path: &Path,
+    result_hash: &str,
+) -> Result<()> {
     let (equity, note) = downsample_equity(&result.equity);
     let underwater = equity
         .iter()
@@ -208,7 +220,7 @@ pub fn write_json(result: &BacktestResult, extras: &ReportExtras, path: &Path) -
     let payload = ReportJson {
         schema_version: SCHEMA_VERSION,
         report_kind: extras.kind(),
-        result_hash,
+        result_hash: result_hash.to_string(),
         meta: &result.meta,
         metrics: &result.metrics,
         equity,
@@ -230,34 +242,285 @@ pub fn write_json(result: &BacktestResult, extras: &ReportExtras, path: &Path) -
         assumptions: ASSUMPTIONS,
         warnings: &result.warnings,
     };
-    let text = serde_json::to_string_pretty(&payload).map_err(|err| ReportError::Serialize {
+    let file = std::fs::File::create(path).map_err(|source| ReportError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, &payload).map_err(|err| ReportError::Serialize {
         message: err.to_string(),
     })?;
-    std::fs::write(path, text).map_err(|source| ReportError::Write {
+    writer.flush().map_err(|source| ReportError::Write {
         path: path.to_path_buf(),
         source,
     })?;
     Ok(())
 }
 
+/// 与旧版 `serde_json::to_value` + 排序键 + 删除运行时字段完全一致的流式哈希。
+///
+/// `serde_json` 默认把对象键存进 `BTreeMap`,旧实现因此按字典序输出。这里
+/// 直接按同一顺序序列化,只把大数组逐元素写进哈希器,不再构建整个 `Value` 树。
 pub fn content_hash(result: &BacktestResult) -> Result<String> {
-    let mut value = serde_json::to_value(result).map_err(|err| ReportError::Serialize {
-        message: err.to_string(),
-    })?;
-    if let Some(meta) = value.get_mut("meta").and_then(|meta| meta.as_object_mut()) {
-        meta.remove("generated_at");
-        meta.remove("threads");
-        meta.remove("engine_version");
+    let mut hasher = Sha256::new();
+    {
+        let mut writer = BufWriter::new(HashWriter {
+            hasher: &mut hasher,
+        });
+        serde_json::to_writer(&mut writer, &CanonicalResult(result)).map_err(|err| {
+            ReportError::Serialize {
+                message: err.to_string(),
+            }
+        })?;
+        writer.flush().map_err(|err| ReportError::Serialize {
+            message: format!("写入内容哈希失败: {err}"),
+        })?;
     }
-    let bytes = serde_json::to_vec(&value).map_err(|err| ReportError::Serialize {
-        message: err.to_string(),
-    })?;
-    let digest = Sha256::digest(&bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    let mut out = String::with_capacity(64);
+    for byte in hasher.finalize() {
         let _ = write!(out, "{byte:02x}");
     }
     Ok(out)
+}
+
+struct HashWriter<'a> {
+    hasher: &'a mut Sha256,
+}
+
+impl IoWrite for HashWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct CanonicalResult<'a>(&'a BacktestResult);
+
+impl Serialize for CanonicalResult<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let result = self.0;
+        let mut map =
+            serializer.serialize_map(Some(if result.funding.is_some() { 9 } else { 8 }))?;
+        map.serialize_entry("drawdowns", &CanonicalSlice(&result.drawdowns))?;
+        map.serialize_entry("equity", &CanonicalSlice(&result.equity))?;
+        map.serialize_entry("fills", &CanonicalSlice(&result.fills))?;
+        if let Some(funding) = &result.funding {
+            map.serialize_entry("funding", &CanonicalRef(funding))?;
+        }
+        map.serialize_entry("meta", &CanonicalRef(&result.meta))?;
+        map.serialize_entry("metrics", &CanonicalRef(&result.metrics))?;
+        map.serialize_entry("monthly", &CanonicalSlice(&result.monthly))?;
+        map.serialize_entry("trades", &CanonicalSlice(&result.trades))?;
+        map.serialize_entry("warnings", &result.warnings)?;
+        map.end()
+    }
+}
+
+trait CanonicalItem {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer;
+}
+
+struct CanonicalRef<'a, T: CanonicalItem>(&'a T);
+
+impl<T: CanonicalItem> Serialize for CanonicalRef<'_, T> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize_canonical(serializer)
+    }
+}
+
+struct CanonicalSlice<'a, T: CanonicalItem>(&'a [T]);
+
+impl<T: CanonicalItem> Serialize for CanonicalSlice<'_, T> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for item in self.0 {
+            seq.serialize_element(&CanonicalRef(item))?;
+        }
+        seq.end()
+    }
+}
+
+impl CanonicalItem for RunMeta {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("RunMeta", 12)?;
+        state.serialize_field("config_hash", &self.config_hash)?;
+        state.serialize_field("data_hash", &self.data_hash)?;
+        state.serialize_field("first_bar_ts", &self.first_bar_ts)?;
+        state.serialize_field("last_bar_ts", &self.last_bar_ts)?;
+        state.serialize_field("params", &self.params)?;
+        state.serialize_field("requested_end", &self.requested_end)?;
+        state.serialize_field("requested_start", &self.requested_start)?;
+        state.serialize_field("strategy", &self.strategy)?;
+        state.serialize_field("symbols", &self.symbols)?;
+        state.serialize_field("timeframe", &self.timeframe)?;
+        state.serialize_field("walk_forward_window", &self.walk_forward_window)?;
+        state.serialize_field("warnings", &self.warnings)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for Metrics {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("Metrics", 19)?;
+        state.serialize_field("annual_volatility", &self.annual_volatility)?;
+        state.serialize_field("cagr", &self.cagr)?;
+        state.serialize_field("calmar", &self.calmar)?;
+        state.serialize_field("cost_drag", &self.cost_drag)?;
+        state.serialize_field("expectancy", &self.expectancy)?;
+        state.serialize_field("exposure", &self.exposure)?;
+        state.serialize_field("max_drawdown", &self.max_drawdown)?;
+        state.serialize_field(
+            "max_drawdown_duration_days",
+            &self.max_drawdown_duration_days,
+        )?;
+        state.serialize_field("periods_per_year", &self.periods_per_year)?;
+        state.serialize_field("profit_factor", &self.profit_factor)?;
+        state.serialize_field("risk_free_rate", &self.risk_free_rate)?;
+        state.serialize_field("sharpe", &self.sharpe)?;
+        state.serialize_field("sortino", &self.sortino)?;
+        state.serialize_field("total_fees", &self.total_fees)?;
+        state.serialize_field("total_return", &self.total_return)?;
+        state.serialize_field("trades", &self.trades)?;
+        state.serialize_field("turnover", &self.turnover)?;
+        state.serialize_field("ulcer", &self.ulcer)?;
+        state.serialize_field("win_rate", &self.win_rate)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for FundingSummary {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("FundingSummary", 5)?;
+        state.serialize_field("by_symbol", &CanonicalSlice(&self.by_symbol))?;
+        state.serialize_field("events", &self.events)?;
+        state.serialize_field("paid", &self.paid)?;
+        state.serialize_field("received", &self.received)?;
+        state.serialize_field("total_cost", &self.total_cost)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for SymbolFunding {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("SymbolFunding", 3)?;
+        state.serialize_field("cost", &self.cost)?;
+        state.serialize_field("events", &self.events)?;
+        state.serialize_field("symbol", &self.symbol)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for EquityPoint {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("EquityPoint", 5)?;
+        state.serialize_field("cash", &self.cash)?;
+        state.serialize_field("drawdown", &self.drawdown)?;
+        state.serialize_field("equity", &self.equity)?;
+        state.serialize_field("gross_exposure", &self.gross_exposure)?;
+        state.serialize_field("ts", &self.ts)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for FillRecord {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("FillRecord", 10)?;
+        state.serialize_field("ambiguous_bar", &self.ambiguous_bar)?;
+        state.serialize_field("fee", &self.fee)?;
+        state.serialize_field("notional", &self.notional)?;
+        state.serialize_field("price", &self.price)?;
+        state.serialize_field("qty", &self.qty)?;
+        state.serialize_field("reason", &self.reason)?;
+        state.serialize_field("side", &self.side)?;
+        state.serialize_field("slippage", &self.slippage)?;
+        state.serialize_field("symbol", &self.symbol)?;
+        state.serialize_field("ts", &self.ts)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for TradeRecord {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("TradeRecord", 12)?;
+        state.serialize_field("bars_held", &self.bars_held)?;
+        state.serialize_field("entry_price", &self.entry_price)?;
+        state.serialize_field("entry_ts", &self.entry_ts)?;
+        state.serialize_field("exit_price", &self.exit_price)?;
+        state.serialize_field("exit_reason", &self.exit_reason)?;
+        state.serialize_field("exit_ts", &self.exit_ts)?;
+        state.serialize_field("fees", &self.fees)?;
+        state.serialize_field("pnl", &self.pnl)?;
+        state.serialize_field("qty", &self.qty)?;
+        state.serialize_field("return_pct", &self.return_pct)?;
+        state.serialize_field("side", &self.side)?;
+        state.serialize_field("symbol", &self.symbol)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for DrawdownEpisode {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("DrawdownEpisode", 6)?;
+        state.serialize_field("depth", &self.depth)?;
+        state.serialize_field("duration_days", &self.duration_days)?;
+        state.serialize_field("peak_ts", &self.peak_ts)?;
+        state.serialize_field("recovered", &self.recovered)?;
+        state.serialize_field("recovery_ts", &self.recovery_ts)?;
+        state.serialize_field("trough_ts", &self.trough_ts)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for MonthlyReturn {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("MonthlyReturn", 3)?;
+        state.serialize_field("month", &self.month)?;
+        state.serialize_field("return_pct", &self.return_pct)?;
+        state.serialize_field("year", &self.year)?;
+        state.end()
+    }
 }
 
 fn downsample_equity(points: &[EquityPoint]) -> (Vec<EquityPoint>, Option<DownsampleNote>) {
@@ -304,6 +567,15 @@ fn report_title(kind: &str) -> &'static str {
 
 pub fn write_html(result: &BacktestResult, extras: &ReportExtras, path: &Path) -> Result<()> {
     let hash = content_hash(result)?;
+    write_html_with_hash(result, extras, path, &hash)
+}
+
+fn write_html_with_hash(
+    result: &BacktestResult,
+    extras: &ReportExtras,
+    path: &Path,
+    hash: &str,
+) -> Result<()> {
     let meta = &result.meta;
     let metrics = &result.metrics;
     let kind = extras.kind();
@@ -352,7 +624,7 @@ pub fn write_html(result: &BacktestResult, extras: &ReportExtras, path: &Path) -
     monthly_section(&mut html, &result.monthly);
     drawdown_section(&mut html, &result.drawdowns);
     trades_section(&mut html, &result.trades, &meta.symbols);
-    costs_section(&mut html, result, &hash);
+    costs_section(&mut html, result, hash);
     sensitivity_section(&mut html, extras.sweep.as_ref());
     robustness_section(
         &mut html,
@@ -1643,6 +1915,61 @@ mod tests {
             content_hash(&first).expect("hash"),
             content_hash(&second).expect("hash")
         );
+    }
+
+    fn legacy_canonical_bytes(result: &BacktestResult) -> Vec<u8> {
+        let mut value = serde_json::to_value(result).expect("value");
+        if let Some(meta) = value.get_mut("meta").and_then(|meta| meta.as_object_mut()) {
+            meta.remove("generated_at");
+            meta.remove("threads");
+            meta.remove("engine_version");
+        }
+        serde_json::to_vec(&value).expect("bytes")
+    }
+
+    fn canonical_bytes(result: &BacktestResult) -> Vec<u8> {
+        let mut out = Vec::new();
+        serde_json::to_writer(&mut out, &CanonicalResult(result)).expect("canonical");
+        out
+    }
+
+    #[test]
+    fn canonical_stream_matches_legacy_value_bytes() {
+        let mut result = sample_result();
+        result.fills = vec![FillRecord {
+            ts: 1_577_836_800_000,
+            symbol: 0,
+            side: Side::Buy,
+            qty: 10.0,
+            price: 100.0,
+            notional: 1_000.0,
+            fee: 0.5,
+            slippage: 0.2,
+            reason: FillReason::Entry,
+            ambiguous_bar: false,
+        }];
+        result.funding = Some(FundingSummary {
+            total_cost: 12.5,
+            paid: 20.0,
+            received: 7.5,
+            events: 3,
+            by_symbol: vec![SymbolFunding {
+                symbol: 0,
+                cost: 12.5,
+                events: 3,
+            }],
+        });
+        assert_eq!(canonical_bytes(&result), legacy_canonical_bytes(&result));
+
+        let digest = Sha256::digest(legacy_canonical_bytes(&result));
+        let mut expected = String::with_capacity(64);
+        for byte in digest {
+            let _ = write!(expected, "{byte:02x}");
+        }
+        assert_eq!(content_hash(&result).expect("hash"), expected);
+
+        result.funding = None;
+        assert_eq!(canonical_bytes(&result), legacy_canonical_bytes(&result));
     }
 
     #[test]

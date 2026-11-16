@@ -2,7 +2,7 @@
 
 纯 Rust 的多周期、多标的、可做空策略回测引擎,支持直接读取 Binance/Dukascopy 归档,参数扫描与 walk-forward。
 
-- 当前阶段:M4 分块流式加载与哈希 v2
+- 当前阶段:M6 报告流式哈希与写入
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -56,8 +56,13 @@ Binance `futures/um`/`futures/cm` 默认按归档资金费结算,结果与报告
 策略历史只读、引擎状态延续;`run`、`sweep` 与 `walkforward` 的整段/分块
 `data_hash`、`result_hash` 与 `sweep_hash` 一致。契约见
 [流程设计 §3.10](./docs/03-流程设计.md),验收见
-[M4 分块流式加载](./STEP.d/14-chunking.md) 与
-[M5 walk-forward 分块](./STEP.d/15-walkforward-chunking.md)。
+[M4 分块流式加载](./STEP.d/14-chunking.md)、
+[M5 walk-forward 分块](./STEP.d/15-walkforward-chunking.md) 与
+[M6 报告流式哈希与写入](./STEP.d/16-report-streaming-hash.md)。
+
+报告阶段也采用流式处理:`result_hash` 直接按规范键序写入 SHA-256,
+`result.json` 用 `BufWriter` 输出,不再构建整棵 `serde_json::Value`。
+1843200 bar 样本的报告阶段峰值从约 2 GB 降到约 413 MB,历史哈希不变。
 
 ## 测试与门禁
 
@@ -79,6 +84,8 @@ release 构建;`cargo audit` 需要访问 RustSec 公告库。
 - [M2 归档数据源验收](./STEP.d/12-archive-source.md)
 - [M3 资金费验收](./STEP.d/13-funding.md)
 - [M4 分块流式加载验收](./STEP.d/14-chunking.md)
+- [M5 walk-forward 分块验收](./STEP.d/15-walkforward-chunking.md)
+- [M6 报告流式哈希与写入验收](./STEP.d/16-report-streaming-hash.md)
 
 ## 许可
 

@@ -56,6 +56,9 @@
 - M5:`walkforward` 接入 `chunk_bars`/`memory_limit_gb` 分块,训练网格与 OOS 测试共用 `sweep::Data` 与 `run_single` 路径。
 - M5:`walkforward::execute` 改为接收 `sweep::Data`,窗口规划、时间戳与 `data_hash` 不再依赖整段 `Universe`;无新增配置、CLI 或报告字段。
 - M5:新增整段/分块 walkforward 单测与 CLI 契约测试,覆盖窗口参数、OOS 净值、参数稳定性、DSR 与资金费;新增 `STEP.d/15-walkforward-chunking.md` 与 `docs/changes/009-walkforward-chunking.md`。
+- M6:`content_hash` 改为流式规范序列化,按旧 `serde_json::Value` 的字典序直接写入 SHA-256,不再构建整棵结果树;排除的运行时字段与 `funding` 省略规则不变。
+- M6:`write_json` 改用 `BufWriter` 与 `to_writer_pretty`;`write_report` 只计算一次 `result_hash` 并复用于 JSON 与 HTML。
+- M6:新增旧实现逐字节对比测试;1843200 bar 样本峰值 RSS 从约 2088 MB 降到约 413 MB,整段/分块 `result_hash` 与历史冒烟哈希不变;新增 `STEP.d/16-report-streaming-hash.md` 与 `docs/changes/010-report-streaming-hash.md`。
 
 ### 验收
 
@@ -131,3 +134,22 @@
   `cargo test --workspace --locked`(174 个)与 `cargo build --release --locked`;
   夹具、1m 与 4 标的 1h 的整段/分块 `result_hash`、`data_hash`、
   窗口参数与 OOS 指标均与工作副本一致。
+- 2026-11-16:M6 验收,175 个测试、fmt、check、clippy、nextest、doctest、
+  rustdoc、deny、audit、release 构建与 `scripts/check.sh --ci` 全部通过。
+- Binance spot BTCUSDT 1m 2023-05 至 2026-10(1843200 bar):
+  整段峰值 RSS 从 2087.8 MB 降到 412.6 MB,分块从 2000.1 MB 降到 412.8 MB;
+  `result_hash` 同为 `f7026895...`、`data_hash` 同为 `36ec7667...`,
+  22097 笔交易与 44194 笔成交不变。
+- 改造后的 `result.json` 除 `meta.generated_at` 外与改造前逐字段相同,
+  文件大小同为 12,739,787 字节;`content_hash` 由旧实现逐字节对比测试兜底。
+- S1/S2/S3/1h/1w、walk-forward 与 sweep 冒烟哈希保持不变:
+  `efbb00b9...`、`cd330ad9...`、`d84b7985...`、`7c680a05...`、
+  `7c4c0da1...`、`4f0e7bd6...`、`41d11ac9...`。
+- BTCUSDT UM 1m 2023-06 与 4 标的 1h 2024-01 用 M6 二进制复跑整段/分块,
+  `result_hash` 仍为 `f648cd3e...`、`54259a53...`,`data_hash` 仍为
+  `d9dc81d8...`、`da7521b2...`。
+- 改造后报告阶段不再抬高进程峰值;剩余约 413 MB 由归档规划阶段
+  `plan_archive()` 的整段 `load_universe_reporting()` 主导。
+- 提交 `待补` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(175 个)与 `cargo build --release --locked`;
+  大样本整段/分块复跑的 `result_hash`、`data_hash` 与工作副本一致。

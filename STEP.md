@@ -88,8 +88,9 @@ Binance 期货默认结算资金费,可用 `source.funding = false` 关闭。
 命令不变;整段与分块结果哈希一致。
 验收证据见 [M2 归档数据源](./STEP.d/12-archive-source.md)、
 [M3 资金费](./STEP.d/13-funding.md)、
-[M4 分块流式加载](./STEP.d/14-chunking.md) 与
-[M5 walk-forward 分块](./STEP.d/15-walkforward-chunking.md)。
+[M4 分块流式加载](./STEP.d/14-chunking.md)、
+[M5 walk-forward 分块](./STEP.d/15-walkforward-chunking.md) 与
+[M6 报告流式哈希与写入](./STEP.d/16-report-streaming-hash.md)。
 
 ## 步骤
 
@@ -109,3 +110,4 @@ Binance 期货默认结算资金费,可用 `source.funding = false` 关闭。
 - [13 M3 资金费验收](./STEP.d/13-funding.md)
 - [14 M4 分块流式加载验收](./STEP.d/14-chunking.md)
 - [15 M5 walk-forward 分块验收](./STEP.d/15-walkforward-chunking.md)
+- [16 M6 报告流式哈希与写入验收](./STEP.d/16-report-streaming-hash.md)
