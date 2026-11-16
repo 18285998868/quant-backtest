@@ -142,7 +142,8 @@
 
 ## 干净克隆
 
-提交后克隆到 `data-reader` 同级的 `qb-m7-clean`:
+提交 `9782a68` 克隆到 `data-reader` 同级的 `qb-m7-clean`,
+用于确认 path 依赖与月窗口规划不依赖工作区残留:
 
 - `cargo test --workspace --locked`:181 个通过;
 - `cargo build --release --locked`:成功;
@@ -151,6 +152,8 @@
   `data_hash = 376a13c5...`;
 - `fixtures/walkforward.toml` 与 `fixtures/sweep.toml` 分别为
   `4f0e7bd6...`、`41d11ac9...`。
+
+克隆目录保留为 `qb-m7-clean`,可用于后续检查。
 
 ## 限制
 

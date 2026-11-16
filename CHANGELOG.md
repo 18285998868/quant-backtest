@@ -169,6 +169,6 @@
 - 历史哈希保持不变:`efbb00b9...`、`cd330ad9...`、`d84b7985...`、
   `7c680a05...`、`7c4c0da1...`、`f648cd3e...`/`d9dc81d8...`、
   `54259a53...`/`da7521b2...`、`4f0e7bd6...`、`41d11ac9...`。
-- 提交 `待补` 的干净克隆(与 `data-reader` 同级)通过
+- 提交 `9782a68` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(181 个)与 `cargo build --release --locked`;
   大样本 `validate` 与多标的整段/分块哈希与工作副本一致。
