@@ -11,7 +11,7 @@ output_dir = "out/sma"
 threads = "auto"
 # 0 表示自动检测
 memory_limit_gb = 0
-# S1–S3 只实现 1d
+# S1–S4 只实现 1d
 timeframe = "1d"
 risk_free_rate = 0.0
 
@@ -46,6 +46,17 @@ allow_short = false
 # [risk.take_profit]
 # trigger = "close"
 # distance = 0.10
+
+# 可选:参数扫描,配合 `sweep --config <sweep.toml>` 使用
+# [sweep]
+# objective = "sharpe"   # 或 "cagr" / "calmar"
+# top_k = 20
+# oos_split = 0.7
+#
+# [sweep.grid]
+# fast = [2, 4, 8]
+# slow = [10, 20, 30]
+# weight = [0.5, 0.9]
 
 [[instruments]]
 symbol = "TEST"

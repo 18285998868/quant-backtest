@@ -17,6 +17,11 @@
 - S3:截面动量 `xs_momentum`,支持 `top_k`、逆波动率权重、调仓周期与 σ 无效回退等权告警。
 - S3:`Strategy::take_warnings`,策略告警进入结果与元数据。
 - S3:减仓/平仓不受保证金约束,避免浮亏账户无法止损。
+- S4:参数扫描 `[sweep]`,支持 `sharpe/cagr/calmar` 目标、笛卡尔积、非法组合跳过与 top-K。
+- S4:`sweep` 子命令,两阶段执行,输出 `sweep.csv` 与 `sweep_summary.json`。
+- S4:扫描结果规范化 `sweep_hash`,排除线程数、时间与内存等运行时字段。
+- S4:`bench --symbols`,按 symbol-bar 计吞吐,输出每任务耗时与外推时间。
+- S4:S4 冒烟配置 `config/03.sweep.toml` 与验收文档 `STEP.d/08-s4-acceptance.md`。
 
 ### 验收
 
@@ -27,3 +32,6 @@
 - 2026-11-16:S3 验收,82 个测试、fmt、clippy、doc、deny/audit(离线)与 release 冒烟全部通过。
 - S3 组合冒烟 2 个标的、4 笔交易、10 笔成交、0 条告警;二次运行 `result_hash` 一致:`8796ce7f400ccbd6a30592c2a98bfba0258b53f609e108a07767fc7a17e2a411`。
 - S1/S2 回归哈希保持不变:`144d1118...`、`8476c228...`。
+- 2026-11-16:S4 验收,92 个测试、fmt、clippy、doc、deny/audit(离线)与 release 冒烟全部通过。
+- S4 扫描冒烟 27 组、18 有效、9 组非法跳过,`sweep_hash` 为 `3e92bf60...`,auto/1/2 线程一致。
+- S1/S2/S3 回归哈希保持不变:`144d1118...`、`8476c228...`、`8796ce7f...`。

@@ -20,6 +20,22 @@ pub struct ResolvedWorkers {
     pub warnings: Vec<String>,
 }
 
+pub fn peak_rss_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_peak_rss(&text)
+}
+
+fn parse_peak_rss(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some("VmHWM:") {
+            let value = parts.next()?.parse::<u64>().ok()?;
+            return Some(value.saturating_mul(1024));
+        }
+    }
+    None
+}
+
 pub fn detect_capacity() -> Capacity {
     let mut notes = Vec::new();
     let mut cpu_available = match std::thread::available_parallelism() {
@@ -315,5 +331,11 @@ mod tests {
     fn parses_meminfo_available() {
         let text = "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n";
         assert_eq!(parse_meminfo_available(text), Some(8_000_000 * 1024));
+    }
+
+    #[test]
+    fn parses_peak_rss() {
+        let text = "Name:\tquant-backtest\nVmHWM:\t  2048 kB\n";
+        assert_eq!(parse_peak_rss(text), Some(2048 * 1024));
     }
 }

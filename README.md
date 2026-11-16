@@ -2,7 +2,7 @@
 
 纯 Rust 的日线级、多标的、可做空策略回测引擎。
 
-- 当前阶段:S3 多标的共享账户与截面动量
+- 当前阶段:S4 参数扫描与缩放基准
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -19,6 +19,7 @@ cargo build --release
 cargo run --release -- validate --config config/00.smoke.toml
 cargo run --release -- run --config config/00.smoke.toml
 cargo run --release -- run --config config/02.portfolio-smoke.toml
+cargo run --release -- sweep --config config/03.sweep.toml
 cargo run --release -- bench --scale
 ```
 

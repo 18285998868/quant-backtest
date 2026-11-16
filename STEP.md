@@ -9,6 +9,7 @@
 - 冒烟配置:`config/00.smoke.toml`
 - 风控冒烟:`config/01.risk-smoke.toml`
 - 组合冒烟:`config/02.portfolio-smoke.toml`
+- 扫描冒烟:`config/03.sweep.toml`
 
 ## 命令
 
@@ -16,6 +17,7 @@
 | --- | --- |
 | `quant-backtest validate --config <run.toml>` | 校验配置与数据 |
 | `quant-backtest run --config <run.toml>` | 单次回测,输出 JSON 与 HTML |
+| `quant-backtest sweep --config <sweep.toml>` | 参数扫描,输出 `sweep.csv` 与 `sweep_summary.json` |
 | `quant-backtest bench` | 合成负载吞吐基准 |
 | `quant-backtest bench --scale` | 1/2/4/8 线程缩放基准 |
 
@@ -30,6 +32,12 @@ CLI
   -> 逐 bar: 开盘成交 -> 收盘估值 -> 策略信号 -> 下一根订单
   -> 指标/回撤/月度
   -> result.json + report.html
+
+sweep
+  -> 展开 [sweep.grid]
+  -> 并行跑全部组合,只保留指标
+  -> 按目标排序
+  -> 重跑 top-K,写 sweep.csv + sweep_summary.json
 ```
 
 ## 退出码
@@ -49,6 +57,7 @@ cargo run --release -- validate --config config/00.smoke.toml
 cargo run --release -- run --config config/00.smoke.toml
 cargo run --release -- run --config config/01.risk-smoke.toml
 cargo run --release -- run --config config/02.portfolio-smoke.toml
+cargo run --release -- sweep --config config/03.sweep.toml
 cargo run --release -- bench --scale
 ```
 
@@ -62,3 +71,4 @@ cargo run --release -- bench --scale
 - [05 S1 验收](./STEP.d/05-acceptance.md)
 - [06 S2 风控验收](./STEP.d/06-s2-acceptance.md)
 - [07 S3 组合验收](./STEP.d/07-s3-acceptance.md)
+- [08 S4 扫描验收](./STEP.d/08-s4-acceptance.md)

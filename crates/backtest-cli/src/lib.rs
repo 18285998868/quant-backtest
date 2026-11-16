@@ -23,6 +23,8 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 
+mod sweep;
+
 const BENCH_TASKS: usize = 500;
 const BENCH_BARS: usize = 2_500;
 const BENCH_REPS: usize = 3;
@@ -63,6 +65,21 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// 参数扫描并输出 sweep.csv 与 sweep_summary.json
+    Sweep {
+        /// 扫描配置 TOML
+        #[arg(long, value_name = "sweep.toml")]
+        config: PathBuf,
+        /// 覆盖配置中的线程数
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 覆盖配置中的内存上限(GiB)
+        #[arg(long)]
+        memory_limit_gb: Option<f64>,
+        /// 覆盖配置中的输出目录
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// 合成负载吞吐基准
     Bench {
         /// 固定线程数
@@ -77,6 +94,9 @@ enum Command {
         /// 每个任务的 bar 数,默认 2500
         #[arg(long, default_value_t = BENCH_BARS)]
         bars: usize,
+        /// 合成标的数,默认 1
+        #[arg(long, default_value_t = 1)]
+        symbols: usize,
     },
 }
 
@@ -100,12 +120,19 @@ fn dispatch(command: Command) -> Result<()> {
             memory_limit_gb,
             out,
         } => cmd_run(&config, threads, memory_limit_gb, out),
+        Command::Sweep {
+            config,
+            threads,
+            memory_limit_gb,
+            out,
+        } => cmd_sweep(&config, threads, memory_limit_gb, out),
         Command::Bench {
             threads,
             scale,
             tasks,
             bars,
-        } => cmd_bench(threads, scale, tasks, bars),
+            symbols,
+        } => cmd_bench(threads, scale, tasks, bars, symbols),
     }
 }
 
@@ -151,10 +178,90 @@ fn cmd_run(
     Ok(())
 }
 
-fn cmd_bench(threads: Option<usize>, scale: bool, tasks: usize, bars: usize) -> Result<()> {
-    if tasks == 0 || bars == 0 {
+fn cmd_sweep(
+    path: &Path,
+    threads: Option<usize>,
+    memory_limit_gb: Option<f64>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let mut config = load_config(path)?;
+    if config.sweep.is_none() {
         return Err(backtest_core::error::ConfigError::Invalid {
-            field: "bench.tasks/bench.bars".into(),
+            field: "sweep".into(),
+            message: "配置缺少 [sweep] 段".into(),
+        }
+        .into());
+    }
+    config.apply_overrides(threads, memory_limit_gb, out)?;
+    let workers = resolve_for(&config)?;
+    print_capacity(&workers);
+    let universe = load(&config)?;
+    print_universe(&config, &universe);
+    let run = sweep::execute(
+        &config,
+        &universe,
+        &workers,
+        threads.is_some(),
+        memory_limit_gb.is_some(),
+    )?;
+    let paths = sweep::write_outputs(&run, &config.output_dir)?;
+    let summary = &run.summary;
+    println!(
+        "扫描:共 {} 组,有效 {},跳过非法 {},告警 {}",
+        summary.counts.total,
+        summary.counts.valid,
+        summary.counts.skipped_invalid,
+        summary.counts.warnings
+    );
+    println!(
+        "目标:{} top_k={} oos_split={} 线程={}",
+        summary.meta.objective, summary.meta.top_k, summary.meta.oos_split, summary.meta.threads
+    );
+    if let Some(first) = summary.results.first() {
+        let params = first
+            .params
+            .iter()
+            .map(|(name, value)| format!("{name}={}", param_text(value)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "最佳:#1 {} sharpe={} cagr={} calmar={} 参数[{}]",
+            first.config_hash,
+            format_opt(first.metrics.sharpe),
+            format_opt(first.metrics.cagr),
+            format_opt(first.metrics.calmar),
+            params
+        );
+    }
+    println!("哈希:sweep={}", summary.sweep_hash);
+    println!("产物:{}", paths.csv.display());
+    println!("产物:{}", paths.json.display());
+    Ok(())
+}
+
+fn param_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn format_opt(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn cmd_bench(
+    threads: Option<usize>,
+    scale: bool,
+    tasks: usize,
+    bars: usize,
+    symbols: usize,
+) -> Result<()> {
+    if tasks == 0 || bars == 0 || symbols == 0 {
+        return Err(backtest_core::error::ConfigError::Invalid {
+            field: "bench.tasks/bench.bars/bench.symbols".into(),
             message: "必须大于 0".into(),
         }
         .into());
@@ -163,7 +270,7 @@ fn cmd_bench(threads: Option<usize>, scale: bool, tasks: usize, bars: usize) -> 
     let workers = resolve_for_requested(threads, None, &capacity)?;
     print_capacity(&workers);
     println!(
-        "基准:任务数 {tasks},每任务 {bars} bar,每个策略重复 {BENCH_REPS} 次,单 worker 预算 {} MiB",
+        "基准:任务数 {tasks},每任务 {bars} bar × {symbols} 标的,每个策略重复 {BENCH_REPS} 次,单 worker 预算 {} MiB",
         DEFAULT_WORKER_BUDGET_BYTES / (1024 * 1024)
     );
 
@@ -172,7 +279,7 @@ fn cmd_bench(threads: Option<usize>, scale: bool, tasks: usize, bars: usize) -> 
     } else {
         vec![workers.threads]
     };
-    let universe = Arc::new(synthetic_universe(bars));
+    let universe = Arc::new(synthetic_universe(bars, symbols));
     let mut rates = Vec::new();
     for thread in thread_list {
         if thread > capacity.cpu_available {
@@ -191,9 +298,15 @@ fn cmd_bench(threads: Option<usize>, scale: bool, tasks: usize, bars: usize) -> 
         for kind in [BenchKind::Empty, BenchKind::SmaCross] {
             let rate = measure(&pool, kind, tasks, &universe)?;
             rates.push((kind.label(), thread, rate));
+            let per_task_us = if rate > 0.0 {
+                (bars * symbols) as f64 / rate * 1_000_000.0
+            } else {
+                f64::INFINITY
+            };
             println!(
-                "{:<10} threads={thread:<2} tasks={tasks} bars={bars} reps={BENCH_REPS} throughput={rate:.0} bar步/秒",
-                kind.label()
+                "{:<10} threads={thread:<2} tasks={tasks} bars={bars} symbols={symbols} reps={BENCH_REPS} throughput={rate:.0} bar步/秒 每任务={per_task_us:.3} us 1.25e9步外推={:.1} 分钟",
+                kind.label(),
+                projected_minutes(rate)
             );
         }
     }
@@ -214,6 +327,15 @@ fn cmd_bench(threads: Option<usize>, scale: bool, tasks: usize, bars: usize) -> 
             .unwrap_or_else(|| "未知".into())
     );
     Ok(())
+}
+
+fn projected_minutes(rate: f64) -> f64 {
+    const TARGET_STEPS: f64 = 500.0 * 2500.0 * 1000.0;
+    if rate <= 0.0 {
+        f64::INFINITY
+    } else {
+        TARGET_STEPS / rate / 60.0
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -256,6 +378,7 @@ fn measure(
     universe: &Arc<Universe>,
 ) -> Result<f64> {
     let steps = tasks.saturating_mul(universe.len());
+    let throughput_steps = steps.saturating_mul(universe.symbol_count());
     let started = Instant::now();
     for _ in 0..BENCH_REPS {
         let results: Result<Vec<usize>> = pool.install(|| {
@@ -282,7 +405,7 @@ fn measure(
     if elapsed <= 0.0 {
         return Ok(f64::INFINITY);
     }
-    Ok(steps as f64 * BENCH_REPS as f64 / elapsed)
+    Ok(throughput_steps as f64 * BENCH_REPS as f64 / elapsed)
 }
 
 fn bench_input() -> EngineInput {
@@ -300,7 +423,7 @@ fn bench_input() -> EngineInput {
     }
 }
 
-fn synthetic_universe(bars: usize) -> Universe {
+fn synthetic_universe(bars: usize, symbols: usize) -> Universe {
     let base = 1_600_000_000_000_i64;
     let day = 86_400_000_i64;
     let mut ts = Vec::with_capacity(bars);
@@ -320,30 +443,35 @@ fn synthetic_universe(bars: usize) -> Universe {
         close.push(price);
         volume.push(1_000_000.0);
     }
-    let spec = InstrumentSpec {
-        symbol: "SYN".into(),
-        asset_class: backtest_core::model::AssetClass::Crypto,
-        currency: "USD".into(),
-        multiplier: 1.0,
-        lot_size: 0.0,
-        margin_rate: 1.0,
-        fee_bps: 0.0,
-        fee_fixed: 0.0,
-        slippage_bps: 0.0,
-        periods_per_year: Some(365),
-    };
+    let mut specs = Vec::with_capacity(symbols);
+    let mut series = Vec::with_capacity(symbols);
+    for symbol in 0..symbols {
+        specs.push(InstrumentSpec {
+            symbol: format!("SYN{symbol}"),
+            asset_class: backtest_core::model::AssetClass::Crypto,
+            currency: "USD".into(),
+            multiplier: 1.0,
+            lot_size: 0.0,
+            margin_rate: 1.0,
+            fee_bps: 0.0,
+            fee_fixed: 0.0,
+            slippage_bps: 0.0,
+            periods_per_year: Some(365),
+        });
+        series.push(backtest_core::model::BarSeries {
+            symbol: symbol as u32,
+            ts: ts.clone(),
+            open: open.clone(),
+            high: high.clone(),
+            low: low.clone(),
+            close: close.clone(),
+            volume: volume.clone(),
+        });
+    }
     Universe {
         timeframe: Timeframe::ONE_DAY,
-        specs: vec![spec],
-        series: vec![backtest_core::model::BarSeries {
-            symbol: 0,
-            ts: ts.clone(),
-            open,
-            high,
-            low,
-            close,
-            volume,
-        }],
+        specs,
+        series,
         timeline: ts,
         data_hash: String::new(),
     }
@@ -479,7 +607,7 @@ mod tests {
 
     #[test]
     fn synthetic_universe_is_well_formed() {
-        let universe = synthetic_universe(64);
+        let universe = synthetic_universe(64, 1);
         assert_eq!(universe.len(), 64);
         for index in 0..universe.len() {
             let bar = universe.bar(0, index);

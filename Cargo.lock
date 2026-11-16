@@ -77,8 +77,11 @@ dependencies = [
  "backtest-strategy",
  "chrono",
  "clap",
+ "csv",
  "rayon",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

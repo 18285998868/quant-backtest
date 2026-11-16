@@ -134,6 +134,189 @@ impl StrategyConfig {
             },
         }
     }
+
+    pub fn accepts_param(&self, name: &str) -> bool {
+        match self {
+            StrategyConfig::SmaCross { .. } => {
+                matches!(name, "fast" | "slow" | "weight" | "allow_short")
+            }
+            StrategyConfig::XsMomentum { .. } => matches!(
+                name,
+                "lookback"
+                    | "top_k"
+                    | "rebalance_bars"
+                    | "weighting"
+                    | "vol_lookback"
+                    | "vol_floor"
+                    | "gross"
+            ),
+        }
+    }
+
+    /// 用扫描网格中的一个标量覆盖策略参数。
+    pub fn apply_param(&mut self, name: &str, value: &serde_json::Value) -> Result<()> {
+        let field_name = format!("sweep.grid.{name}");
+        match self {
+            StrategyConfig::SmaCross {
+                fast,
+                slow,
+                weight,
+                allow_short,
+            } => match name {
+                "fast" => *fast = json_usize(&field_name, value)?,
+                "slow" => *slow = json_usize(&field_name, value)?,
+                "weight" => *weight = json_f64(&field_name, value)?,
+                "allow_short" => {
+                    *allow_short = value.as_bool().ok_or_else(|| ConfigError::Invalid {
+                        field: field_name,
+                        message: format!("期望布尔值,实际 {value}"),
+                    })?
+                }
+                _ => return Err(unknown_param(name)),
+            },
+            StrategyConfig::XsMomentum {
+                lookback,
+                top_k,
+                rebalance_bars,
+                weighting,
+                gross,
+            } => match name {
+                "lookback" => *lookback = json_usize(&field_name, value)?,
+                "top_k" => *top_k = json_usize(&field_name, value)?,
+                "rebalance_bars" => *rebalance_bars = json_usize(&field_name, value)?,
+                "weighting" => {
+                    let raw = value.as_str().ok_or_else(|| ConfigError::Invalid {
+                        field: field_name,
+                        message: format!("期望字符串,实际 {value}"),
+                    })?;
+                    *weighting = parse_weighting_value(raw, *lookback, *weighting)?;
+                }
+                "vol_lookback" => {
+                    let vol = json_usize(&field_name, value)?;
+                    let floor = match weighting {
+                        Weighting::InverseVol { floor, .. } => *floor,
+                        Weighting::Equal => DEFAULT_VOL_FLOOR,
+                    };
+                    *weighting = Weighting::InverseVol {
+                        lookback: vol,
+                        floor,
+                    };
+                }
+                "vol_floor" => {
+                    let floor = json_f64(&field_name, value)?;
+                    let vol = match weighting {
+                        Weighting::InverseVol { lookback, .. } => *lookback,
+                        Weighting::Equal => *lookback,
+                    };
+                    *weighting = Weighting::InverseVol {
+                        lookback: vol,
+                        floor,
+                    };
+                }
+                "gross" => *gross = json_f64(&field_name, value)?,
+                _ => return Err(unknown_param(name)),
+            },
+        }
+        Ok(())
+    }
+}
+
+fn parse_weighting_value(raw: &str, lookback: usize, current: Weighting) -> Result<Weighting> {
+    match raw.to_ascii_lowercase().as_str() {
+        "equal" => Ok(Weighting::Equal),
+        "inverse_vol" => Ok(match current {
+            Weighting::InverseVol { lookback, floor } => Weighting::InverseVol { lookback, floor },
+            Weighting::Equal => Weighting::InverseVol {
+                lookback,
+                floor: DEFAULT_VOL_FLOOR,
+            },
+        }),
+        other => Err(ConfigError::Unsupported {
+            what: "加权方式",
+            value: other.to_string(),
+            supported: "equal, inverse_vol",
+        }
+        .into()),
+    }
+}
+
+fn json_usize(field_name: &str, value: &serde_json::Value) -> Result<usize> {
+    let raw = value.as_u64().ok_or_else(|| ConfigError::Invalid {
+        field: field_name.into(),
+        message: format!("期望非负整数,实际 {value}"),
+    })?;
+    usize::try_from(raw).map_err(|_| {
+        ConfigError::Invalid {
+            field: field_name.into(),
+            message: format!("{raw} 超出 usize 范围"),
+        }
+        .into()
+    })
+}
+
+fn json_f64(field_name: &str, value: &serde_json::Value) -> Result<f64> {
+    value.as_f64().ok_or_else(|| {
+        ConfigError::Invalid {
+            field: field_name.into(),
+            message: format!("期望数值,实际 {value}"),
+        }
+        .into()
+    })
+}
+
+fn unknown_param(name: &str) -> crate::error::Error {
+    ConfigError::Invalid {
+        field: format!("sweep.grid.{name}"),
+        message: format!("策略不支持参数 '{name}'"),
+    }
+    .into()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Objective {
+    Sharpe,
+    Cagr,
+    Calmar,
+}
+
+impl Objective {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "sharpe" => Ok(Self::Sharpe),
+            "cagr" => Ok(Self::Cagr),
+            "calmar" => Ok(Self::Calmar),
+            other => Err(ConfigError::Unsupported {
+                what: "扫描目标",
+                value: other.to_string(),
+                supported: "sharpe, cagr, calmar",
+            }
+            .into()),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sharpe => "sharpe",
+            Self::Cagr => "cagr",
+            Self::Calmar => "calmar",
+        }
+    }
+
+    pub fn value(self, metrics: &crate::model::Metrics) -> Option<f64> {
+        match self {
+            Self::Sharpe => metrics.sharpe,
+            Self::Cagr => metrics.cagr,
+            Self::Calmar => metrics.calmar,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SweepConfig {
+    pub objective: Objective,
+    pub top_k: usize,
+    pub oos_split: f64,
+    pub grid: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,6 +334,7 @@ pub struct RunConfig {
     pub risk: RiskConfig,
     pub strategy: StrategyConfig,
     pub instruments: Vec<InstrumentSpec>,
+    pub sweep: Option<SweepConfig>,
     pub config_hash: String,
 }
 
@@ -194,6 +378,26 @@ impl RunConfig {
         Ok(())
     }
 
+    pub fn with_strategy(&self, strategy: StrategyConfig) -> Result<Self> {
+        validate_strategy(&strategy, &self.instruments)?;
+        let config_hash = hash_config(&ConfigHashInput {
+            initial_cash: self.initial_cash,
+            start: self.start,
+            end: self.end,
+            timeframe: self.timeframe,
+            risk_free_rate: self.risk_free_rate,
+            execution: self.execution,
+            risk: self.risk,
+            strategy: &strategy,
+            instruments: &self.instruments,
+        })?;
+        Ok(Self {
+            strategy,
+            config_hash,
+            ..self.clone()
+        })
+    }
+
     pub fn min_margin_rate(&self) -> f64 {
         self.instruments
             .iter()
@@ -218,6 +422,8 @@ struct RawConfig {
     #[serde(default)]
     risk: RawRisk,
     strategy: RawStrategy,
+    #[serde(default)]
+    sweep: Option<RawSweep>,
     #[serde(default)]
     instruments: Vec<RawInstrument>,
 }
@@ -298,6 +504,19 @@ struct RawStrategy {
     vol_floor: Option<f64>,
     #[serde(default)]
     gross: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSweep {
+    #[serde(default)]
+    objective: Option<String>,
+    #[serde(default)]
+    top_k: Option<usize>,
+    #[serde(default)]
+    oos_split: Option<f64>,
+    #[serde(default)]
+    grid: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,6 +647,7 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
     };
 
     let strategy = parse_strategy(raw.strategy)?;
+    let sweep = parse_sweep(raw.sweep, &strategy)?;
 
     if raw.instruments.is_empty() {
         return Err(field("instruments", "至少需要一个标的"));
@@ -542,6 +762,7 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
         risk,
         strategy,
         instruments,
+        sweep,
         config_hash,
     })
 }
@@ -643,6 +864,55 @@ fn parse_strategy(raw: RawStrategy) -> Result<StrategyConfig> {
     }
 }
 
+fn parse_sweep(raw: Option<RawSweep>, strategy: &StrategyConfig) -> Result<Option<SweepConfig>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let objective = match raw.objective {
+        Some(text) => Objective::parse(&text)?,
+        None => Objective::Sharpe,
+    };
+    let top_k = raw.top_k.unwrap_or(20);
+    if top_k == 0 {
+        return Err(field("sweep.top_k", "必须大于 0"));
+    }
+    let oos_split = raw.oos_split.unwrap_or(0.7);
+    if !oos_split.is_finite() || oos_split <= 0.0 || oos_split >= 1.0 {
+        return Err(field("sweep.oos_split", "必须在 (0, 1) 区间内"));
+    }
+    if raw.grid.is_empty() {
+        return Err(field("sweep.grid", "至少需要一个参数"));
+    }
+    for (name, values) in &raw.grid {
+        if name.trim().is_empty() {
+            return Err(field("sweep.grid", "参数名不能为空"));
+        }
+        if !strategy.accepts_param(name) {
+            return Err(field(
+                &format!("sweep.grid.{name}"),
+                &format!("策略 '{}' 不支持该参数", strategy.name()),
+            ));
+        }
+        if values.is_empty() {
+            return Err(field(&format!("sweep.grid.{name}"), "参数值列表不能为空"));
+        }
+        for value in values {
+            if !(value.is_number() || value.is_string() || value.is_boolean()) {
+                return Err(field(
+                    &format!("sweep.grid.{name}"),
+                    &format!("只支持标量值,实际 {value}"),
+                ));
+            }
+        }
+    }
+    Ok(Some(SweepConfig {
+        objective,
+        top_k,
+        oos_split,
+        grid: raw.grid,
+    }))
+}
+
 fn parse_risk_leg(raw: Option<RawRiskLeg>, field_name: &str) -> Result<Option<RiskLeg>> {
     let Some(raw) = raw else {
         return Ok(None);
@@ -692,6 +962,70 @@ fn parse_ts(raw: &str, field_name: &str) -> Result<Ts> {
         field_name,
         &format!("'{raw}' 不是 RFC3339、epoch 毫秒或 YYYY-MM-DD"),
     ))
+}
+
+fn validate_strategy(strategy: &StrategyConfig, instruments: &[InstrumentSpec]) -> Result<()> {
+    let min_margin = instruments
+        .iter()
+        .map(|spec| spec.margin_rate)
+        .fold(f64::INFINITY, f64::min);
+    let limit = 1.0 / min_margin;
+    match strategy {
+        StrategyConfig::SmaCross {
+            fast, slow, weight, ..
+        } => {
+            if *fast == 0 {
+                return Err(field("strategy.fast", "必须大于 0"));
+            }
+            if *slow <= *fast {
+                return Err(field("strategy.slow", "必须大于 strategy.fast"));
+            }
+            if !weight.is_finite() || *weight <= 0.0 {
+                return Err(field("strategy.weight", "必须是有限且 > 0 的数值"));
+            }
+            if *weight > limit + 1e-12 {
+                return Err(field(
+                    "strategy.weight",
+                    &format!("{} 超过保证金允许的单标的权重上限 {:.6}", weight, limit),
+                ));
+            }
+        }
+        StrategyConfig::XsMomentum {
+            lookback,
+            top_k,
+            rebalance_bars,
+            weighting,
+            gross,
+        } => {
+            if *lookback == 0 {
+                return Err(field("strategy.lookback", "必须大于 0"));
+            }
+            if *top_k == 0 {
+                return Err(field("strategy.top_k", "必须大于 0"));
+            }
+            if *rebalance_bars == 0 {
+                return Err(field("strategy.rebalance_bars", "必须大于 0"));
+            }
+            if let Weighting::InverseVol { lookback, floor } = weighting {
+                if *lookback < 2 {
+                    return Err(field("strategy.vol_lookback", "必须大于等于 2"));
+                }
+                if !floor.is_finite() || *floor <= 0.0 {
+                    return Err(field("strategy.vol_floor", "必须是有限且 > 0 的数值"));
+                }
+            }
+            if !gross.is_finite() || *gross <= 0.0 {
+                return Err(field("strategy.gross", "必须是有限且 > 0 的数值"));
+            }
+            if *gross > limit + 1e-12 {
+                return Err(field(
+                    "strategy.gross",
+                    &format!("{} 超过保证金允许的总敞口上限 {:.6}", gross, limit),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_positive(name: &str, value: f64) -> Result<()> {
@@ -1037,6 +1371,63 @@ gross = 0.9
     fn rejects_xs_momentum_gross_above_margin_limit() {
         let text = xs_config_text().replace("gross = 0.9", "gross = 1.5");
         let error = load_text(&text).expect_err("gross above limit");
+        assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+    }
+
+    fn with_sweep(body: &str) -> String {
+        format!(
+            "{}\n[sweep]\nobjective = \"sharpe\"\ntop_k = 3\noos_split = 0.7\n\n[sweep.grid]\n{body}\n",
+            config_text("1d", ONE_INSTRUMENT)
+        )
+    }
+
+    #[test]
+    fn loads_sweep_grid_and_applies_overrides() {
+        let text = with_sweep("fast = [2, 4]\nslow = [5]");
+        let config = load_text(&text).expect("sweep config");
+        let sweep = config.sweep.as_ref().expect("sweep");
+        assert_eq!(sweep.objective, Objective::Sharpe);
+        assert_eq!(sweep.top_k, 3);
+        assert_eq!(sweep.grid["fast"].len(), 2);
+
+        let mut strategy = config.strategy.clone();
+        strategy
+            .apply_param("fast", &serde_json::json!(4))
+            .expect("fast");
+        strategy
+            .apply_param("slow", &serde_json::json!(5))
+            .expect("slow");
+        let changed = config.with_strategy(strategy).expect("valid strategy");
+        assert_ne!(changed.config_hash, config.config_hash);
+        assert_eq!(changed.strategy.params()["fast"], 4);
+    }
+
+    #[test]
+    fn with_strategy_rejects_invalid_combination() {
+        let config = load_text(&with_sweep("fast = [2]\nslow = [5]")).expect("config");
+        let mut strategy = config.strategy.clone();
+        strategy
+            .apply_param("fast", &serde_json::json!(60))
+            .expect("fast");
+        let error = config.with_strategy(strategy).expect_err("must fail");
+        assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+    }
+
+    #[test]
+    fn rejects_invalid_sweep_sections() {
+        for (old, new) in [
+            ("top_k = 3", "top_k = 0"),
+            ("oos_split = 0.7", "oos_split = 1.5"),
+        ] {
+            let text = with_sweep("fast = [2]").replace(old, new);
+            let error = load_text(&text).expect_err("invalid sweep");
+            assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+        }
+        let unknown = with_sweep("mystery = [1]");
+        let error = load_text(&unknown).expect_err("unknown grid key");
+        assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+        let nested = with_sweep("fast = [[1, 2]]");
+        let error = load_text(&nested).expect_err("non-scalar grid value");
         assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
     }
 }

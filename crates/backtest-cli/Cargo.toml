@@ -17,10 +17,13 @@ backtest-report = { path = "../backtest-report", version = "0.1.0" }
 backtest-strategy = { path = "../backtest-strategy", version = "0.1.0" }
 chrono.workspace = true
 clap.workspace = true
+csv.workspace = true
 rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]
