@@ -650,14 +650,6 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
         return Err(field("run.memory_limit_gb", "必须是有限且 >= 0 的数值"));
     }
     let timeframe = Timeframe::parse(&raw.run.timeframe)?;
-    if timeframe != Timeframe::ONE_DAY {
-        return Err(ConfigError::Unsupported {
-            what: "周期",
-            value: timeframe.to_string(),
-            supported: "1d (分钟/小时/周线在 M1 阶段实现)",
-        }
-        .into());
-    }
     let start = raw
         .run
         .start
@@ -1330,11 +1322,28 @@ allow_short = false
     }
 
     #[test]
+    fn accepts_supported_timeframes() {
+        for raw in ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"] {
+            let config = load_text(&config_text(raw, ONE_INSTRUMENT)).expect(raw);
+            assert_eq!(config.timeframe.to_string(), raw);
+        }
+    }
+
+    #[test]
+    fn periods_per_year_override_wins_over_timeframe() {
+        let instruments =
+            ONE_INSTRUMENT.replace("periods_per_year = 365", "periods_per_year = 100");
+        let config = load_text(&config_text("1h", &instruments)).expect("config");
+        assert_eq!(config.timeframe.to_string(), "1h");
+        assert_eq!(config.periods_per_year(), 100);
+    }
+
+    #[test]
     fn rejects_unsupported_timeframe() {
-        let error = load_text(&config_text("1h", ONE_INSTRUMENT)).expect_err("must fail");
+        let error = load_text(&config_text("5x", ONE_INSTRUMENT)).expect_err("must fail");
         assert!(matches!(
             error,
-            Error::Config(ConfigError::Unsupported { .. })
+            Error::Config(ConfigError::Invalid { ref field, .. }) if field == "timeframe"
         ));
     }
 

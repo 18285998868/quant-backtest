@@ -1,8 +1,8 @@
 # quant-backtest
 
-纯 Rust 的日线级、多标的、可做空策略回测引擎,支持参数扫描与 walk-forward。
+纯 Rust 的多周期、多标的、可做空策略回测引擎,支持参数扫描与 walk-forward。
 
-- 当前阶段:S6 健壮性与交付
+- 当前阶段:M1 多周期
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -25,6 +25,8 @@ cargo build --release --locked
 cargo run --release --locked -- validate --config config/00.smoke.toml
 cargo run --release --locked -- run --config config/00.smoke.toml
 cargo run --release --locked -- run --config config/02.portfolio-smoke.toml
+cargo run --release --locked -- run --config config/04.intraday.toml
+cargo run --release --locked -- run --config config/05.weekly.toml
 cargo run --release --locked -- sweep --config fixtures/sweep.toml
 cargo run --release --locked -- walkforward --config fixtures/walkforward.toml
 ```
@@ -49,6 +51,7 @@ release 构建;`cargo audit` 需要访问 RustSec 公告库。
 - [调研与决策](./docs/02-调研与决策.md)
 - [流程设计](./docs/03-流程设计.md)
 - [S6 验收](./STEP.d/10-s6-acceptance.md)
+- [M1 多周期验收](./STEP.d/11-m1-acceptance.md)
 
 ## 许可
 

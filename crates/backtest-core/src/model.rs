@@ -216,6 +216,17 @@ impl Universe {
     }
 
     /// 受信任索引。调用方必须保证 symbol 与 index 已在 `Universe` 内。
+    /// 数据区常驻内存的粗略估算,不含 `Vec`/分配器开销与配置。
+    pub fn estimated_data_bytes(&self) -> u64 {
+        let timeline = self.timeline.len() as u64 * std::mem::size_of::<Ts>() as u64;
+        let series = self
+            .series
+            .iter()
+            .map(|item| item.len() as u64 * 5 * std::mem::size_of::<f64>() as u64)
+            .sum::<u64>();
+        timeline + series
+    }
+
     pub fn bar(&self, symbol: SymbolId, index: usize) -> BarView {
         let series = &self.series[symbol as usize];
         BarView {
@@ -463,7 +474,55 @@ mod tests {
         assert_eq!(Timeframe::ONE_DAY.bars_per_year(AssetClass::Crypto), 365);
         assert_eq!(Timeframe::ONE_DAY.bars_per_year(AssetClass::UsEquity), 252);
         assert_eq!(Timeframe::ONE_DAY.bars_per_year(AssetClass::Fx), 252);
-        let week = Timeframe::parse("1w").expect("1w");
-        assert_eq!(week.bars_per_year(AssetClass::Crypto), 52);
+        let cases = [
+            ("1m", 525_600, 98_280, 362_880),
+            ("5m", 105_120, 19_656, 72_576),
+            ("15m", 35_040, 6_552, 24_192),
+            ("30m", 17_520, 3_276, 12_096),
+            ("1h", 8_760, 1_638, 6_048),
+            ("4h", 2_190, 410, 1_512),
+            ("1w", 52, 52, 52),
+        ];
+        for (raw, crypto, equity, fx) in cases {
+            let timeframe = Timeframe::parse(raw).expect(raw);
+            assert_eq!(timeframe.bars_per_year(AssetClass::Crypto), crypto, "{raw}");
+            assert_eq!(
+                timeframe.bars_per_year(AssetClass::UsEquity),
+                equity,
+                "{raw}"
+            );
+            assert_eq!(timeframe.bars_per_year(AssetClass::Fx), fx, "{raw}");
+        }
+    }
+
+    #[test]
+    fn estimated_data_bytes_counts_timeline_and_ohlcv() {
+        let universe = Universe {
+            timeframe: Timeframe::ONE_DAY,
+            specs: Vec::new(),
+            series: vec![
+                BarSeries {
+                    symbol: 0,
+                    ts: vec![0; 3],
+                    open: vec![0.0; 3],
+                    high: vec![0.0; 3],
+                    low: vec![0.0; 3],
+                    close: vec![0.0; 3],
+                    volume: vec![0.0; 3],
+                },
+                BarSeries {
+                    symbol: 1,
+                    ts: vec![0; 3],
+                    open: vec![0.0; 3],
+                    high: vec![0.0; 3],
+                    low: vec![0.0; 3],
+                    close: vec![0.0; 3],
+                    volume: vec![0.0; 3],
+                },
+            ],
+            timeline: vec![0; 3],
+            data_hash: String::new(),
+        };
+        assert_eq!(universe.estimated_data_bytes(), 3 * 8 + 2 * 3 * 5 * 8);
     }
 }

@@ -10,6 +10,8 @@
 - 风控冒烟:`config/01.risk-smoke.toml`
 - 组合冒烟:`config/02.portfolio-smoke.toml`
 - 扫描冒烟:`config/03.sweep.toml`
+- 小时线冒烟:`config/04.intraday.toml`
+- 周线冒烟:`config/05.weekly.toml`
 - 样本外冒烟:`fixtures/sweep.toml`
 - walk-forward 冒烟:`fixtures/walkforward.toml`
 
@@ -71,6 +73,8 @@ cargo run --release -- validate --config config/00.smoke.toml
 cargo run --release -- run --config config/00.smoke.toml
 cargo run --release -- run --config config/01.risk-smoke.toml
 cargo run --release -- run --config config/02.portfolio-smoke.toml
+cargo run --release -- run --config config/04.intraday.toml
+cargo run --release -- run --config config/05.weekly.toml
 cargo run --release -- sweep --config config/03.sweep.toml
 cargo run --release -- sweep --config fixtures/sweep.toml
 cargo run --release -- walkforward --config fixtures/walkforward.toml
@@ -90,3 +94,4 @@ cargo run --release -- bench --scale
 - [08 S4 扫描验收](./STEP.d/08-s4-acceptance.md)
 - [09 S5 指标与报告验收](./STEP.d/09-s5-acceptance.md)
 - [10 S6 健壮性与交付验收](./STEP.d/10-s6-acceptance.md)
+- [11 M1 多周期验收](./STEP.d/11-m1-acceptance.md)

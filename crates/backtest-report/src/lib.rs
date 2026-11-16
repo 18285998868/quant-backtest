@@ -33,7 +33,7 @@ const ASSUMPTIONS: &[&str] = &[
     "止损/止盈按首次入场均价计算;加减仓不重置,回到空仓后再次开仓才重置。",
     "同一 bar 同时触发止损与止盈时按止损成交,并标记 ambiguous_bar。",
     "收盘触发的止损/止盈在下一根开盘成交,不按触发 bar 的收盘价成交。",
-    "S1–S5 只实现日线;分钟/小时/周线在 M1 阶段实现。",
+    "周期由配置声明;年化因子按 timeframe 与 asset_class 推导,或用 periods_per_year 覆盖。",
     "样本外按时间 70/30 切分:样本内选参,样本外只评估一次;排名相关性只对 IS 前 100 名计算。",
     "walk-forward 的 OOS 收益按窗口测试段复利拼接;训练/测试预热区间不产生订单,也不计入 OOS 收益。",
     "DSR 只校正搜索次数,不校正参数相关性;高度相关网格的有效试验数小于 N,DSR 偏乐观。",
@@ -530,7 +530,7 @@ fn monthly_section(html: &mut String, monthly: &[MonthlyReturn]) {
     }
     table.push_str("</tbody></table>\n");
     html.push_str(&table);
-    html.push_str("<p class=\"note\">按 UTC 自然月复合日收益;颜色由全表最小/最大月度收益线性映射。</p>\n</div>\n");
+    html.push_str("<p class=\"note\">按 UTC 自然月复合 bar 收益;颜色由全表最小/最大月度收益线性映射。</p>\n</div>\n");
 }
 
 fn drawdown_section(html: &mut String, drawdowns: &[DrawdownEpisode]) {
@@ -1557,6 +1557,9 @@ mod tests {
         ] {
             assert!(html.contains(chapter), "缺少章节 {chapter}");
         }
+        assert!(!html.contains("S1–S5 只实现日线"));
+        assert!(html.contains("周期由配置声明"));
+        assert!(html.contains("复合 bar 收益"));
     }
 
     #[test]

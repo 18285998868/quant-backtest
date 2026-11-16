@@ -163,7 +163,7 @@ fn cmd_validate(path: &Path) -> Result<()> {
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
     let universe = load(&config)?;
-    print_universe(&config, &universe);
+    print_universe(&config, &universe, &workers);
     println!("校验通过: {}", path.display());
     Ok(())
 }
@@ -179,7 +179,7 @@ fn cmd_run(
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
     let universe = load(&config)?;
-    print_universe(&config, &universe);
+    print_universe(&config, &universe, &workers);
 
     let mut strategy = build(&config.strategy, config.instruments.len());
     let input = EngineInput {
@@ -222,7 +222,7 @@ fn cmd_sweep(
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
     let universe = load(&config)?;
-    print_universe(&config, &universe);
+    print_universe(&config, &universe, &workers);
     let run = sweep::execute(
         &config,
         &universe,
@@ -298,7 +298,7 @@ fn cmd_walkforward(
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
     let universe = load(&config)?;
-    print_universe(&config, &universe);
+    print_universe(&config, &universe, &workers);
     let run = walkforward::execute(&config, &wf, &universe, &workers)?;
     let result = &run.result;
     println!(
@@ -627,7 +627,7 @@ fn print_capacity(workers: &ResolvedWorkers) {
     );
 }
 
-fn print_universe(config: &RunConfig, universe: &Universe) {
+fn print_universe(config: &RunConfig, universe: &Universe, workers: &ResolvedWorkers) {
     let first = universe.timeline.first().copied().map(format_ts);
     let last = universe.timeline.last().copied().map(format_ts);
     println!(
@@ -637,6 +637,11 @@ fn print_universe(config: &RunConfig, universe: &Universe) {
         first.unwrap_or_else(|| "—".into()),
         last.unwrap_or_else(|| "—".into())
     );
+    let estimated = universe.estimated_data_bytes();
+    println!("数据内存:约 {}", format_bytes(estimated));
+    if let Some(warning) = data_memory_warning(estimated, workers.memory_limit_bytes) {
+        eprintln!("警告: {warning}");
+    }
     println!(
         "哈希:config={} data={}",
         config.config_hash, universe.data_hash
@@ -651,6 +656,18 @@ fn print_universe(config: &RunConfig, universe: &Universe) {
             .join(", ")
     );
     println!("周期: {}", universe.timeframe);
+}
+
+fn data_memory_warning(estimated: u64, limit: Option<u64>) -> Option<String> {
+    let limit = limit?;
+    if estimated <= limit {
+        return None;
+    }
+    Some(format!(
+        "数据常驻内存约 {},超过内存上限 {};分钟级数据请缩小 run.start/run.end 或改用更粗周期",
+        format_bytes(estimated),
+        format_bytes(limit)
+    ))
 }
 
 fn print_result(result: &backtest_core::model::BacktestResult, paths: &ReportPaths) {
@@ -692,6 +709,20 @@ fn format_gib(bytes: u64) -> String {
     format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.1} MiB", value / MIB)
+    } else {
+        format!("{:.1} KiB", value / KIB)
+    }
+}
+
 /// 把任意错误转成退出码,便于测试与嵌入。
 pub fn exit_code(error: &Error) -> u8 {
     error.exit_code() as u8
@@ -717,6 +748,17 @@ mod tests {
         assert_eq!(format_pct(None), "—");
         assert_eq!(format_pct(Some(0.0123)), "1.23%");
         assert_eq!(format_gib(2 * 1024 * 1024 * 1024), "2.00 GiB");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
+    fn data_memory_warning_only_fires_above_limit() {
+        assert!(data_memory_warning(100, None).is_none());
+        assert!(data_memory_warning(100, Some(100)).is_none());
+        let warning = data_memory_warning(101, Some(100)).expect("warning");
+        assert!(warning.contains("超过内存上限"), "{warning}");
+        assert!(warning.contains("run.start/run.end"), "{warning}");
     }
 
     #[test]
