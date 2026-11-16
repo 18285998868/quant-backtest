@@ -2,7 +2,7 @@
 
 纯 Rust 的多周期、多标的、可做空策略回测引擎,支持直接读取 Binance/Dukascopy 归档,参数扫描与 walk-forward。
 
-- 当前阶段:M6 报告流式哈希与写入
+- 当前阶段:M7 归档按月窗口规划
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -64,6 +64,11 @@ Binance `futures/um`/`futures/cm` 默认按归档资金费结算,结果与报告
 `result.json` 用 `BufWriter` 输出,不再构建整棵 `serde_json::Value`。
 1843200 bar 样本的报告阶段峰值从约 2 GB 降到约 413 MB,历史哈希不变。
 
+归档规划在 `start`/`end` 有界且周期短于一天时按 UTC 月分窗,逐窗只保留
+单标的单月 OHLCV,不再整段构造 `RawBar` 与 `Universe`。1843200 bar 样本的
+`validate` 峰值从约 413 MB 降到约 38 MB,`data_hash` 与 `result_hash` 不变;
+验收见 [M7 归档按月窗口规划](./STEP.d/17-monthly-archive-planning.md)。
+
 ## 测试与门禁
 
 ```bash
@@ -86,6 +91,7 @@ release 构建;`cargo audit` 需要访问 RustSec 公告库。
 - [M4 分块流式加载验收](./STEP.d/14-chunking.md)
 - [M5 walk-forward 分块验收](./STEP.d/15-walkforward-chunking.md)
 - [M6 报告流式哈希与写入验收](./STEP.d/16-report-streaming-hash.md)
+- [M7 归档按月窗口规划验收](./STEP.d/17-monthly-archive-planning.md)
 
 ## 许可
 

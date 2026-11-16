@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use csv::StringRecord;
 
 use backtest_core::config::{DataInput, SourceConfig};
@@ -186,7 +186,272 @@ fn plan_csv(options: &LoadOptions<'_>, path: &Path) -> Result<(DataPlan, LoadDia
     ))
 }
 
+/// 规划归档数据。起止区间都有界且周期短于一天时,按 UTC 月分窗,
+/// 逐窗只保留单标的单月 bar;否则回退整段装载。
 fn plan_archive(options: &LoadOptions<'_>) -> Result<(DataPlan, LoadDiagnostics)> {
+    let LoadSource::Archive(source) = options.source else {
+        return plan_archive_full(options);
+    };
+    if let (Some(start), Some(end)) = (options.start, options.end)
+        && start < end
+        && options.timeframe.duration_ms() < DAY_MS
+        && let Some(result) = plan_archive_windows(options, source, start, end)?
+    {
+        return Ok(result);
+    }
+    plan_archive_full(options)
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlanWindow {
+    /// 交给归档读取层的范围,用于选中正确的日/月文件。
+    load_start: Ts,
+    load_end: Ts,
+    /// 精确过滤后的闭区间 `[min_ts, max_ts]`。
+    min_ts: Ts,
+    max_ts: Ts,
+}
+
+/// 按 UTC 月切分 `[start, end)`,窗口之间互不重叠。
+///
+/// 相邻窗口在月界的归属是左开右闭:上一窗包含 `ts == month_start` 的 bar,
+/// 下一窗从 `month_start + timeframe` 开始读取,从而只扫一次该月文件。
+fn plan_windows(start: Ts, end: Ts, duration: i64) -> Result<Vec<PlanWindow>> {
+    if start >= end {
+        return Ok(Vec::new());
+    }
+    let max_ts = end
+        .checked_sub(1)
+        .ok_or(DataError::TimestampRange { value: end })?;
+    let boundaries = month_boundaries(start, end)?;
+    if boundaries.is_empty() {
+        return Ok(vec![PlanWindow {
+            load_start: start,
+            load_end: end,
+            min_ts: start,
+            max_ts,
+        }]);
+    }
+
+    let mut windows = Vec::with_capacity(boundaries.len() + 1);
+    windows.push(PlanWindow {
+        load_start: start,
+        load_end: boundaries[0],
+        min_ts: start,
+        max_ts: boundaries[0],
+    });
+    for pair in boundaries.windows(2) {
+        let (lower, upper) = (pair[0], pair[1]);
+        windows.push(PlanWindow {
+            load_start: lower
+                .checked_add(duration)
+                .ok_or(DataError::TimestampRange { value: lower })?,
+            load_end: upper,
+            min_ts: lower
+                .checked_add(1)
+                .ok_or(DataError::TimestampRange { value: lower })?,
+            max_ts: upper,
+        });
+    }
+    let lower = boundaries[boundaries.len() - 1];
+    windows.push(PlanWindow {
+        load_start: lower
+            .checked_add(duration)
+            .ok_or(DataError::TimestampRange { value: lower })?,
+        load_end: end,
+        min_ts: lower
+            .checked_add(1)
+            .ok_or(DataError::TimestampRange { value: lower })?,
+        max_ts,
+    });
+    windows.retain(|window| window.min_ts <= window.max_ts);
+    Ok(windows)
+}
+
+fn month_boundaries(start: Ts, end: Ts) -> Result<Vec<Ts>> {
+    let mut boundaries = Vec::new();
+    let mut cursor = next_month_start(start)?;
+    while cursor < end {
+        boundaries.push(cursor);
+        cursor = next_month_start(cursor)?;
+    }
+    Ok(boundaries)
+}
+
+fn next_month_start(value: Ts) -> Result<Ts> {
+    let datetime =
+        DateTime::<Utc>::from_timestamp_millis(value).ok_or(DataError::TimestampRange { value })?;
+    let (year, month) = if datetime.month() == 12 {
+        (
+            datetime
+                .year()
+                .checked_add(1)
+                .ok_or(DataError::TimestampRange { value })?,
+            1,
+        )
+    } else {
+        (datetime.year(), datetime.month() + 1)
+    };
+    let date =
+        NaiveDate::from_ymd_opt(year, month, 1).ok_or(DataError::TimestampRange { value })?;
+    let datetime = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or(DataError::TimestampRange { value })?;
+    Ok(datetime.and_utc().timestamp_millis())
+}
+
+fn plan_archive_windows(
+    options: &LoadOptions<'_>,
+    source: &SourceConfig,
+    start: Ts,
+    end: Ts,
+) -> Result<Option<(DataPlan, LoadDiagnostics)>> {
+    let windows = plan_windows(start, end, options.timeframe.duration_ms())?;
+    if windows.len() <= 1 {
+        return Ok(None);
+    }
+
+    let (mut funding, funding_diagnostics) = archive::load_funding(options, source)?;
+    let funding_enabled = !funding.is_empty();
+    let mut timeline: Vec<Ts> = Vec::new();
+    let mut counts = vec![0usize; options.instruments.len()];
+    let mut hasher = hash::DataHasher::new(options.instruments.len());
+    let mut bar_notes = Vec::with_capacity(options.instruments.len());
+
+    for (symbol_id, spec) in options.instruments.iter().enumerate() {
+        let mut stats = archive::BarStats::zero(source);
+        let mut previous: Option<Ts> = None;
+        let mut symbol_count = 0usize;
+        for window in &windows {
+            if window.load_start >= window.load_end {
+                continue;
+            }
+            let one = LoadOptions {
+                source: options.source,
+                timeframe: options.timeframe,
+                instruments: std::slice::from_ref(spec),
+                start: Some(window.load_start),
+                end: Some(window.load_end),
+            };
+            let (bars, window_stats) = archive::load_bars_window(&one, source)?;
+            stats.add(window_stats);
+            for bar in bars {
+                if bar.ts < window.min_ts || bar.ts > window.max_ts {
+                    continue;
+                }
+                if let Some(last) = previous {
+                    if bar.ts == last {
+                        return Err(DataError::Duplicate {
+                            symbol: bar.symbol,
+                            ts: bar.ts,
+                        }
+                        .into());
+                    }
+                    if bar.ts < last {
+                        return Err(DataError::Unsorted {
+                            symbol: bar.symbol,
+                            ts: bar.ts,
+                        }
+                        .into());
+                    }
+                }
+                previous = Some(bar.ts);
+                if symbol_id == 0 {
+                    timeline.push(bar.ts);
+                } else {
+                    let expected = timeline.get(symbol_count).copied();
+                    if expected != Some(bar.ts) {
+                        return Err(DataError::TimelineMismatch {
+                            symbol: spec.symbol.clone(),
+                            expected,
+                            actual: Some(bar.ts),
+                        }
+                        .into());
+                    }
+                }
+                symbol_count += 1;
+                hasher.push(
+                    symbol_id,
+                    bar.ts,
+                    [bar.open, bar.high, bar.low, bar.close, bar.volume],
+                );
+            }
+        }
+        if symbol_id == 0 && timeline.is_empty() {
+            // 没有可规划的数据:交给整段路径复现原始错误或旧行为。
+            return Ok(None);
+        }
+        counts[symbol_id] = symbol_count;
+        if symbol_id > 0 {
+            if symbol_count == 0 {
+                return Err(DataError::MissingSymbolData {
+                    symbol: spec.symbol.clone(),
+                }
+                .into());
+            }
+            if symbol_count != timeline.len() {
+                return Err(DataError::TimelineMismatch {
+                    symbol: spec.symbol.clone(),
+                    expected: timeline.get(symbol_count).copied(),
+                    actual: None,
+                }
+                .into());
+            }
+        }
+        bar_notes.push(stats.note(source, &spec.symbol, options.timeframe));
+    }
+
+    if funding_enabled {
+        validate_funding(&funding, options.instruments)?;
+        let first_open = timeline[0]
+            .checked_sub(options.timeframe.duration_ms())
+            .unwrap_or(i64::MIN);
+        let last_ts = timeline[timeline.len() - 1];
+        for series in &mut funding {
+            let mut kept_ts = Vec::with_capacity(series.ts.len());
+            let mut kept_rate = Vec::with_capacity(series.rate.len());
+            for (ts, rate) in series.ts.iter().zip(&series.rate) {
+                if *ts > first_open && *ts <= last_ts {
+                    kept_ts.push(*ts);
+                    kept_rate.push(*rate);
+                }
+            }
+            series.ts = kept_ts;
+            series.rate = kept_rate;
+        }
+    }
+    let funding_rows: Vec<usize> = funding.iter().map(FundingSeries::len).collect();
+    let data_hash = hasher.finish(options.instruments, &funding);
+
+    let mut notes = Vec::with_capacity(bar_notes.len() * if funding_enabled { 3 } else { 1 });
+    let mut funding_notes = funding_diagnostics.notes.into_iter();
+    for (symbol_id, note) in bar_notes.into_iter().enumerate() {
+        notes.push(note);
+        if let Some(funding_note) = funding_notes.next() {
+            notes.push(funding_note);
+        }
+        if funding_enabled {
+            notes.push(format!("资金费: 区间内 {} 次结算", funding_rows[symbol_id]));
+        }
+    }
+
+    Ok(Some((
+        DataPlan {
+            timeframe: options.timeframe,
+            specs: options.instruments.to_vec(),
+            timeline,
+            funding,
+            counts,
+            data_hash,
+        },
+        LoadDiagnostics { notes },
+    )))
+}
+
+/// 整段装载规划:按标的读完整区间,只保留时间线、计数与哈希。
+fn plan_archive_full(options: &LoadOptions<'_>) -> Result<(DataPlan, LoadDiagnostics)> {
     let mut timeline: Vec<Ts> = Vec::new();
     let mut counts = vec![0usize; options.instruments.len()];
     let mut hasher = hash::DataHasher::new(options.instruments.len());
@@ -885,6 +1150,12 @@ mod tests {
         })
     }
 
+    fn ts(text: &str) -> Ts {
+        DateTime::parse_from_rfc3339(text)
+            .expect("timestamp")
+            .timestamp_millis()
+    }
+
     #[test]
     fn loads_single_symbol_and_hashes_are_stable() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1145,6 +1416,107 @@ mod tests {
         assert_eq!(tail.window_start(), 3);
         assert_eq!(tail.window_end(), 10);
         assert_eq!(tail.series[0].len(), 7);
+    }
+
+    #[test]
+    fn plan_windows_partition_months_without_gaps() {
+        let start = ts("2023-05-01T00:00:00Z");
+        let end = ts("2023-08-01T00:00:00Z");
+        let minute = 60_000;
+        let windows = plan_windows(start, end, minute).expect("windows");
+        assert_eq!(windows.len(), 3);
+
+        let june = ts("2023-06-01T00:00:00Z");
+        let july = ts("2023-07-01T00:00:00Z");
+        assert_eq!(
+            windows[0],
+            PlanWindow {
+                load_start: start,
+                load_end: june,
+                min_ts: start,
+                max_ts: june,
+            }
+        );
+        assert_eq!(
+            windows[1],
+            PlanWindow {
+                load_start: june + minute,
+                load_end: july,
+                min_ts: june + 1,
+                max_ts: july,
+            }
+        );
+        assert_eq!(
+            windows[2],
+            PlanWindow {
+                load_start: july + minute,
+                load_end: end,
+                min_ts: july + 1,
+                max_ts: end - 1,
+            }
+        );
+        assert_eq!(windows[0].min_ts, start);
+        assert_eq!(windows[2].max_ts, end - 1);
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].max_ts + 1, pair[1].min_ts);
+        }
+    }
+
+    #[test]
+    fn plan_windows_keeps_single_month_in_one_window() {
+        let start = ts("2023-05-01T00:00:00Z");
+        let end = ts("2023-06-01T00:00:00Z");
+        let windows = plan_windows(start, end, 60_000).expect("windows");
+        assert_eq!(
+            windows,
+            vec![PlanWindow {
+                load_start: start,
+                load_end: end,
+                min_ts: start,
+                max_ts: end - 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_windows_handles_partial_first_and_last_months() {
+        let start = ts("2023-05-15T12:00:00Z");
+        let end = ts("2023-08-10T06:00:00Z");
+        let minute = 60_000;
+        let windows = plan_windows(start, end, minute).expect("windows");
+        assert_eq!(windows.len(), 4);
+        assert_eq!(windows[0].min_ts, start);
+        assert_eq!(windows[0].max_ts, ts("2023-06-01T00:00:00Z"));
+        assert_eq!(windows[3].load_start, ts("2023-08-01T00:00:00Z") + minute);
+        assert_eq!(windows[3].load_end, end);
+        assert_eq!(windows[3].min_ts, ts("2023-08-01T00:00:00Z") + 1);
+        assert_eq!(windows[3].max_ts, end - 1);
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].max_ts + 1, pair[1].min_ts);
+        }
+    }
+
+    #[test]
+    fn plan_windows_excludes_month_boundary_equal_to_end() {
+        let start = ts("2023-05-01T00:00:00Z");
+        let end = ts("2023-07-01T00:00:00Z");
+        let minute = 60_000;
+        let windows = plan_windows(start, end, minute).expect("windows");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[1].load_start, ts("2023-06-01T00:00:00Z") + minute);
+        assert_eq!(windows[1].max_ts, end - 1);
+    }
+
+    #[test]
+    fn next_month_start_rolls_over_year() {
+        assert_eq!(
+            next_month_start(ts("2023-12-15T00:00:00Z")).expect("next month"),
+            ts("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            next_month_start(ts("2024-02-29T12:00:00Z")).expect("next month"),
+            ts("2024-03-01T00:00:00Z")
+        );
     }
 
     #[test]

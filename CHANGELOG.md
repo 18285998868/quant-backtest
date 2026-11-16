@@ -59,6 +59,9 @@
 - M6:`content_hash` 改为流式规范序列化,按旧 `serde_json::Value` 的字典序直接写入 SHA-256,不再构建整棵结果树;排除的运行时字段与 `funding` 省略规则不变。
 - M6:`write_json` 改用 `BufWriter` 与 `to_writer_pretty`;`write_report` 只计算一次 `result_hash` 并复用于 JSON 与 HTML。
 - M6:新增旧实现逐字节对比测试;1843200 bar 样本峰值 RSS 从约 2088 MB 降到约 413 MB,整段/分块 `result_hash` 与历史冒烟哈希不变;新增 `STEP.d/16-report-streaming-hash.md` 与 `docs/changes/010-report-streaming-hash.md`。
+- M7:`plan_archive()` 在归档、`start`/`end` 有界且周期短于一天时按 UTC 月分窗规划,逐窗只保留单标的单月 `RawBar`;无界区间、日线及以上、窗口数 `<= 1` 与参考标的无数据回退整段。
+- M7:资金费一次性装载后按 `(首根开盘, 末根收盘]` 过滤,诊断按标的累计月窗口;不修改 `data-reader`,无新增配置、CLI 或报告字段,`data_hash`/`result_hash` 不变。
+- M7:1843200 bar 样本 `validate` 峰值 RSS 从 413.1 MB 降到 38.1 MB,分块 `run` 从 413.7 MB 降到 209.8 MB;新增 `STEP.d/17-monthly-archive-planning.md` 与 `docs/changes/011-monthly-archive-planning.md`。
 
 ### 验收
 
@@ -153,3 +156,19 @@
 - 提交 `5f4a963` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(175 个)与 `cargo build --release --locked`;
   大样本整段/分块复跑的 `result_hash`、`data_hash` 与工作副本一致。
+- 2026-11-16:M7 验收,181 个测试、fmt、check、clippy、nextest、doctest、
+  rustdoc、deny、audit、release 构建与 `scripts/check.sh --ci` 全部通过。
+- Binance spot BTCUSDT 1m 2023-05 至 2026-10(1843200 bar):`validate`
+  峰值 RSS 从 413.1 MB 降到 38.1 MB,耗时 0.825 s → 1.957 s;分块
+  `run` 从 413.7 MB 降到 209.8 MB,耗时 2.486 s → 3.885 s;
+  `data_hash` 与 `result_hash` 不变。
+- 4 标的 UM 1h 2024-01..2024-03 的 M6/M7、整段/分块 `result_hash`
+  同为 `7f823905...`、`data_hash` 同为 `376a13c5...`,589 笔交易、
+  538 次结算与 67 条告警一致;Dukascopy EURUSD 1h 2023-05..2023-08
+  的 3 个缺失月只进入诊断。
+- 历史哈希保持不变:`efbb00b9...`、`cd330ad9...`、`d84b7985...`、
+  `7c680a05...`、`7c4c0da1...`、`f648cd3e...`/`d9dc81d8...`、
+  `54259a53...`/`da7521b2...`、`4f0e7bd6...`、`41d11ac9...`。
+- 提交 `待补` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(181 个)与 `cargo build --release --locked`;
+  大样本 `validate` 与多标的整段/分块哈希与工作副本一致。
