@@ -19,6 +19,8 @@
 - 单标的允许缺失 bar;多标的必须共享同一 `ts` 序列。
 - 数据哈希覆盖标的、时间戳与 OHLCV,不覆盖文件字节。
 - 一次回测只允许一种计价货币与一个年化因子。
+- `xs_momentum` 的 `lookback`、`top_k`、`rebalance_bars` 必填;`weighting` 默认 `inverse_vol`,`vol_lookback` 默认等于 `lookback`,`vol_floor` 默认 `1e-4`,`gross` 默认 `1.0`。
+- `gross` 与 `sma_cross` 的 `weight` 都受 `1/margin_rate` 上限约束;非法值在启动时报错。
 
 ## 失败模式
 
@@ -37,6 +39,7 @@
 - 重复、乱序、负价、NaN、负成交量、缺列。
 - 多标的时间线不一致与货币不一致。
 - 同内容 CSV 两次加载 `data_hash` 一致。
+- `xs_momentum` 合法配置、等权配置、参数哈希、缺失字段、非法 `lookback/top_k/rebalance_bars/gross/vol_lookback/vol_floor/weighting` 与超保证金上限。
 
 ## 验收
 

@@ -11,7 +11,7 @@ output_dir = "out/sma"
 threads = "auto"
 # 0 表示自动检测
 memory_limit_gb = 0
-# S1/S2 只实现 1d
+# S1–S3 只实现 1d
 timeframe = "1d"
 risk_free_rate = 0.0
 
@@ -26,6 +26,17 @@ slow = 3
 # 目标名义价值 / 权益
 weight = 0.99
 allow_short = false
+
+# 截面动量示例:替换上面的 [strategy] 段
+# [strategy]
+# name = "xs_momentum"
+# lookback = 20
+# top_k = 2
+# rebalance_bars = 5
+# weighting = "inverse_vol"   # 或 "equal"
+# vol_lookback = 20
+# vol_floor = 0.0001
+# gross = 1.0
 
 # 可选:止损/止盈,trigger 为 intrabar 或 close
 # [risk.stop_loss]

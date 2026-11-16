@@ -55,6 +55,8 @@ cargo build --release                                      通过
 bash scripts/check.sh --ci                                 通过(deny/audit ok)
 ```
 
+后续说明:S2 验收时为 60 个测试;S3 新增用例后当前全量为 82 passed,见 `./07-s3-acceptance.md`。
+
 S2 冒烟:
 
 - `config/01.risk-smoke.toml` 校验通过。

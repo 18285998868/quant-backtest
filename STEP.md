@@ -7,6 +7,8 @@
 - 二进制:`quant-backtest`
 - 配置:`run.toml`(见 `config/00.example.toml`)
 - 冒烟配置:`config/00.smoke.toml`
+- 风控冒烟:`config/01.risk-smoke.toml`
+- 组合冒烟:`config/02.portfolio-smoke.toml`
 
 ## 命令
 
@@ -45,6 +47,8 @@ CLI
 cargo test
 cargo run --release -- validate --config config/00.smoke.toml
 cargo run --release -- run --config config/00.smoke.toml
+cargo run --release -- run --config config/01.risk-smoke.toml
+cargo run --release -- run --config config/02.portfolio-smoke.toml
 cargo run --release -- bench --scale
 ```
 
@@ -57,3 +61,4 @@ cargo run --release -- bench --scale
 - [04 CLI、系统检测与基准](./STEP.d/04-cli-system-bench.md)
 - [05 S1 验收](./STEP.d/05-acceptance.md)
 - [06 S2 风控验收](./STEP.d/06-s2-acceptance.md)
+- [07 S3 组合验收](./STEP.d/07-s3-acceptance.md)

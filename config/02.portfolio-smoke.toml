@@ -1,0 +1,46 @@
+[run]
+data = "fixtures/portfolio_2.csv"
+initial_cash = 100000.0
+start = "2020-01-01T00:00:00Z"
+end = "2020-01-13T00:00:00Z"
+output_dir = "target/smoke-s3"
+threads = "auto"
+memory_limit_gb = 0
+timeframe = "1d"
+
+[execution]
+participation_rate = 0.0
+
+[strategy]
+name = "xs_momentum"
+lookback = 2
+top_k = 2
+rebalance_bars = 2
+weighting = "inverse_vol"
+vol_lookback = 2
+vol_floor = 0.0001
+gross = 0.9
+
+[[instruments]]
+symbol = "AAA"
+asset_class = "crypto"
+currency = "USD"
+multiplier = 1.0
+lot_size = 0.0
+margin_rate = 1.0
+fee_bps = 0.0
+fee_fixed = 0.0
+slippage_bps = 0.0
+periods_per_year = 365
+
+[[instruments]]
+symbol = "BBB"
+asset_class = "crypto"
+currency = "USD"
+multiplier = 1.0
+lot_size = 0.0
+margin_rate = 1.0
+fee_bps = 0.0
+fee_fixed = 0.0
+slippage_bps = 0.0
+periods_per_year = 365

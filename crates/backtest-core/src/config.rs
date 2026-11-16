@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{ConfigError, Result};
 use crate::model::{AssetClass, InstrumentSpec, Timeframe, Ts};
+use crate::strategy::DEFAULT_VOL_FLOOR;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ThreadSetting {
@@ -45,6 +46,21 @@ impl Default for ExecutionConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Weighting {
+    Equal,
+    InverseVol { lookback: usize, floor: f64 },
+}
+
+impl Weighting {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Weighting::Equal => "equal",
+            Weighting::InverseVol { .. } => "inverse_vol",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum StrategyConfig {
     SmaCross {
@@ -53,12 +69,20 @@ pub enum StrategyConfig {
         weight: f64,
         allow_short: bool,
     },
+    XsMomentum {
+        lookback: usize,
+        top_k: usize,
+        rebalance_bars: usize,
+        weighting: Weighting,
+        gross: f64,
+    },
 }
 
 impl StrategyConfig {
     pub fn name(&self) -> &'static str {
         match self {
             StrategyConfig::SmaCross { .. } => "sma_cross",
+            StrategyConfig::XsMomentum { .. } => "xs_momentum",
         }
     }
 
@@ -76,6 +100,23 @@ impl StrategyConfig {
                 map.insert("weight".into(), serde_json::json!(weight));
                 map.insert("allow_short".into(), serde_json::json!(allow_short));
             }
+            StrategyConfig::XsMomentum {
+                lookback,
+                top_k,
+                rebalance_bars,
+                weighting,
+                gross,
+            } => {
+                map.insert("lookback".into(), serde_json::json!(lookback));
+                map.insert("top_k".into(), serde_json::json!(top_k));
+                map.insert("rebalance_bars".into(), serde_json::json!(rebalance_bars));
+                map.insert("weighting".into(), serde_json::json!(weighting.name()));
+                if let Weighting::InverseVol { lookback, floor } = weighting {
+                    map.insert("vol_lookback".into(), serde_json::json!(lookback));
+                    map.insert("vol_floor".into(), serde_json::json!(floor));
+                }
+                map.insert("gross".into(), serde_json::json!(gross));
+            }
         }
         map
     }
@@ -83,6 +124,14 @@ impl StrategyConfig {
     pub fn warmup_bars(&self) -> usize {
         match self {
             StrategyConfig::SmaCross { slow, .. } => *slow,
+            StrategyConfig::XsMomentum {
+                lookback,
+                weighting,
+                ..
+            } => match weighting {
+                Weighting::Equal => *lookback,
+                Weighting::InverseVol { lookback: vol, .. } => (*lookback).max(*vol),
+            },
         }
     }
 }
@@ -235,6 +284,20 @@ struct RawStrategy {
     weight: Option<f64>,
     #[serde(default)]
     allow_short: Option<bool>,
+    #[serde(default)]
+    lookback: Option<usize>,
+    #[serde(default)]
+    top_k: Option<usize>,
+    #[serde(default)]
+    rebalance_bars: Option<usize>,
+    #[serde(default)]
+    weighting: Option<String>,
+    #[serde(default)]
+    vol_lookback: Option<usize>,
+    #[serde(default)]
+    vol_floor: Option<f64>,
+    #[serde(default)]
+    gross: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -436,16 +499,21 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
         .iter()
         .map(|spec| spec.margin_rate)
         .fold(f64::INFINITY, f64::min);
-    let StrategyConfig::SmaCross { weight, .. } = &strategy;
-    if *weight > 1.0 / min_margin + 1e-12 {
-        return Err(field(
-            "strategy.weight",
-            &format!(
-                "{} 超过保证金允许的单标的权重上限 {:.6}",
-                weight,
-                1.0 / min_margin
-            ),
-        ));
+    let limit = 1.0 / min_margin;
+    match &strategy {
+        StrategyConfig::SmaCross { weight, .. } if *weight > limit + 1e-12 => {
+            return Err(field(
+                "strategy.weight",
+                &format!("{} 超过保证金允许的单标的权重上限 {:.6}", weight, limit),
+            ));
+        }
+        StrategyConfig::XsMomentum { gross, .. } if *gross > limit + 1e-12 => {
+            return Err(field(
+                "strategy.gross",
+                &format!("{} 超过保证金允许的总敞口上限 {:.6}", gross, limit),
+            ));
+        }
+        _ => {}
     }
 
     let config_hash = hash_config(&ConfigHashInput {
@@ -504,10 +572,72 @@ fn parse_strategy(raw: RawStrategy) -> Result<StrategyConfig> {
                 allow_short: raw.allow_short.unwrap_or(false),
             })
         }
+        "xs_momentum" => {
+            let lookback = raw
+                .lookback
+                .ok_or_else(|| field("strategy.lookback", "缺少该字段"))?;
+            let top_k = raw
+                .top_k
+                .ok_or_else(|| field("strategy.top_k", "缺少该字段"))?;
+            let rebalance_bars = raw
+                .rebalance_bars
+                .ok_or_else(|| field("strategy.rebalance_bars", "缺少该字段"))?;
+            if lookback == 0 {
+                return Err(field("strategy.lookback", "必须大于 0"));
+            }
+            if top_k == 0 {
+                return Err(field("strategy.top_k", "必须大于 0"));
+            }
+            if rebalance_bars == 0 {
+                return Err(field("strategy.rebalance_bars", "必须大于 0"));
+            }
+            let gross = raw.gross.unwrap_or(1.0);
+            if !gross.is_finite() || gross <= 0.0 {
+                return Err(field("strategy.gross", "必须是有限且 > 0 的数值"));
+            }
+            let weighting = match raw
+                .weighting
+                .as_deref()
+                .unwrap_or("inverse_vol")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "equal" => Weighting::Equal,
+                "inverse_vol" => {
+                    let vol_lookback = raw.vol_lookback.unwrap_or(lookback);
+                    if vol_lookback < 2 {
+                        return Err(field("strategy.vol_lookback", "必须大于等于 2"));
+                    }
+                    let floor = raw.vol_floor.unwrap_or(DEFAULT_VOL_FLOOR);
+                    if !floor.is_finite() || floor <= 0.0 {
+                        return Err(field("strategy.vol_floor", "必须是有限且 > 0 的数值"));
+                    }
+                    Weighting::InverseVol {
+                        lookback: vol_lookback,
+                        floor,
+                    }
+                }
+                other => {
+                    return Err(ConfigError::Unsupported {
+                        what: "加权方式",
+                        value: other.to_string(),
+                        supported: "equal, inverse_vol",
+                    }
+                    .into());
+                }
+            };
+            Ok(StrategyConfig::XsMomentum {
+                lookback,
+                top_k,
+                rebalance_bars,
+                weighting,
+                gross,
+            })
+        }
         other => Err(ConfigError::Unsupported {
             what: "策略",
             value: other.to_string(),
-            supported: "sma_cross",
+            supported: "sma_cross, xs_momentum",
         }
         .into()),
     }
@@ -813,5 +943,100 @@ allow_short = false
             error,
             Error::Config(ConfigError::Unsupported { .. })
         ));
+    }
+
+    fn xs_config_text() -> String {
+        format!(
+            r#"[run]
+data = "bars.csv"
+initial_cash = 100000.0
+start = "2020-01-01"
+end = "2020-02-01"
+output_dir = "out"
+threads = "auto"
+timeframe = "1d"
+
+[strategy]
+name = "xs_momentum"
+lookback = 20
+top_k = 2
+rebalance_bars = 5
+weighting = "inverse_vol"
+vol_lookback = 10
+vol_floor = 0.0001
+gross = 0.9
+
+{ONE_INSTRUMENT}"#
+        )
+    }
+
+    #[test]
+    fn loads_xs_momentum_config_and_hashes_parameters() {
+        let text = xs_config_text();
+        let first = load_text(&text).expect("xs config");
+        assert_eq!(first.strategy.name(), "xs_momentum");
+        assert_eq!(first.strategy.warmup_bars(), 20);
+        let params = first.strategy.params();
+        assert_eq!(params.get("lookback"), Some(&serde_json::json!(20)));
+        assert_eq!(params.get("top_k"), Some(&serde_json::json!(2)));
+        assert_eq!(params.get("rebalance_bars"), Some(&serde_json::json!(5)));
+        assert_eq!(
+            params.get("weighting"),
+            Some(&serde_json::json!("inverse_vol"))
+        );
+        assert_eq!(params.get("vol_lookback"), Some(&serde_json::json!(10)));
+        assert_eq!(params.get("vol_floor"), Some(&serde_json::json!(0.0001)));
+        assert_eq!(params.get("gross"), Some(&serde_json::json!(0.9)));
+
+        let second = load_text(&text).expect("xs config");
+        assert_eq!(first.config_hash, second.config_hash);
+
+        let changed = text.replace("vol_floor = 0.0001", "vol_floor = 0.0002");
+        let third = load_text(&changed).expect("changed xs config");
+        assert_ne!(first.config_hash, third.config_hash);
+    }
+
+    #[test]
+    fn xs_momentum_equal_weighting_omits_vol_parameters() {
+        let text = xs_config_text().replace("weighting = \"inverse_vol\"", "weighting = \"equal\"");
+        let config = load_text(&text).expect("equal xs config");
+        let params = config.strategy.params();
+        assert_eq!(params.get("weighting"), Some(&serde_json::json!("equal")));
+        assert!(!params.contains_key("vol_lookback"));
+        assert!(!params.contains_key("vol_floor"));
+        assert_eq!(config.strategy.warmup_bars(), 20);
+    }
+
+    #[test]
+    fn rejects_invalid_xs_momentum_fields() {
+        for (old, new) in [
+            ("lookback = 20", "lookback = 0"),
+            ("top_k = 2", "top_k = 0"),
+            ("rebalance_bars = 5", "rebalance_bars = 0"),
+            ("gross = 0.9", "gross = 0.0"),
+            ("vol_lookback = 10", "vol_lookback = 1"),
+            ("vol_floor = 0.0001", "vol_floor = 0.0"),
+        ] {
+            let text = xs_config_text().replace(old, new);
+            let error = load_text(&text).expect_err("invalid xs field");
+            assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+        }
+        let unsupported =
+            xs_config_text().replace("weighting = \"inverse_vol\"", "weighting = \"nope\"");
+        let error = load_text(&unsupported).expect_err("unknown weighting");
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::Unsupported { .. })
+        ));
+        let missing = xs_config_text().replace("lookback = 20\n", "");
+        let error = load_text(&missing).expect_err("missing lookback");
+        assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+    }
+
+    #[test]
+    fn rejects_xs_momentum_gross_above_margin_limit() {
+        let text = xs_config_text().replace("gross = 0.9", "gross = 1.5");
+        let error = load_text(&text).expect_err("gross above limit");
+        assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
     }
 }

@@ -237,7 +237,57 @@ impl Engine<'_> {
     }
 
     fn process_open(&mut self, index: usize, ts: Ts) -> Result<()> {
+        let mut sells = Vec::new();
+        let mut buys = Vec::new();
         for symbol in 0..self.positions.len() {
+            let Some(order) = self.pending[symbol].as_ref() else {
+                continue;
+            };
+            let kind = order.kind;
+            let risk_exit = matches!(kind, PendingKind::RiskExit { .. });
+            let delta_sign = match kind {
+                PendingKind::RiskExit { .. } => {
+                    if self.positions[symbol].qty > 0.0 {
+                        -1
+                    } else if self.positions[symbol].qty < 0.0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                PendingKind::Target {
+                    weight,
+                    signal_equity,
+                } => {
+                    let bar = self.universe.bar(symbol as u32, index);
+                    self.target_delta_sign(symbol, &bar, weight, signal_equity)
+                }
+            };
+            let priority = if risk_exit {
+                0_u8
+            } else if let PendingKind::Target {
+                weight,
+                signal_equity,
+            } = kind
+            {
+                let bar = self.universe.bar(symbol as u32, index);
+                if self.target_is_reducing(symbol, &bar, weight, signal_equity) {
+                    1_u8
+                } else {
+                    2_u8
+                }
+            } else {
+                2_u8
+            };
+            if delta_sign < 0 {
+                sells.push((priority, symbol));
+            } else {
+                buys.push((priority, symbol));
+            }
+        }
+        sells.sort_unstable();
+        buys.sort_unstable();
+        for (_, symbol) in sells.into_iter().chain(buys) {
             let Some(order) = self.pending[symbol].take() else {
                 continue;
             };
@@ -260,6 +310,41 @@ impl Engine<'_> {
             }
         }
         Ok(())
+    }
+
+    fn target_delta_sign(
+        &self,
+        symbol: usize,
+        bar: &crate::model::BarView,
+        weight: f64,
+        signal_equity: f64,
+    ) -> i8 {
+        let current =
+            self.positions[symbol].qty * bar.open * self.universe.specs[symbol].multiplier;
+        let target = weight * signal_equity;
+        if target > current {
+            1
+        } else if target < current {
+            -1
+        } else {
+            0
+        }
+    }
+
+    fn target_is_reducing(
+        &self,
+        symbol: usize,
+        bar: &crate::model::BarView,
+        weight: f64,
+        signal_equity: f64,
+    ) -> bool {
+        let qty = self.positions[symbol].qty;
+        if qty == 0.0 {
+            return false;
+        }
+        let current = qty * bar.open * self.universe.specs[symbol].multiplier;
+        let target = weight * signal_equity;
+        target.abs() < current.abs()
     }
 
     fn process_intrabar_risk(&mut self, index: usize, ts: Ts) -> Result<()> {
@@ -528,7 +613,11 @@ impl Engine<'_> {
             return Ok(outcome);
         }
 
-        if !self.margin_feasible(symbol, index, delta, fill_price, fees) {
+        let position_qty = self.positions[symbol].qty;
+        let reducing = position_qty != 0.0
+            && delta.signum() != position_qty.signum()
+            && delta.abs() <= position_qty.abs();
+        if !reducing && !self.margin_feasible(symbol, index, delta, fill_price, fees) {
             let capped = self.max_feasible_delta(symbol, index, delta, fill_price, fees, lot_size);
             if capped.abs() < min_step {
                 outcome.margin_clipped = true;
@@ -769,6 +858,10 @@ impl Engine<'_> {
         };
         self.targets.clear();
         strategy.on_bar(&ctx, &mut self.targets);
+        let strategy_warnings = strategy.take_warnings();
+        if !strategy_warnings.is_empty() {
+            self.warnings.extend(strategy_warnings);
+        }
         self.updates.fill(None);
         for target in &self.targets {
             let symbol = target.symbol as usize;
@@ -1053,6 +1146,54 @@ mod tests {
         }
     }
 
+    struct ScriptedMulti {
+        plan: Vec<(usize, u32, f64)>,
+    }
+
+    impl ScriptedMulti {
+        fn new(plan: &[(usize, u32, f64)]) -> Self {
+            Self {
+                plan: plan.to_vec(),
+            }
+        }
+    }
+
+    impl Strategy for ScriptedMulti {
+        fn on_bar(&mut self, ctx: &MarketContext<'_>, out: &mut Vec<TargetPosition>) {
+            for (index, symbol, weight) in &self.plan {
+                if *index == ctx.index {
+                    out.push(TargetPosition {
+                        symbol: *symbol,
+                        weight: *weight,
+                    });
+                }
+            }
+        }
+    }
+
+    struct Warned {
+        emitted: bool,
+    }
+
+    impl Strategy for Warned {
+        fn on_bar(&mut self, ctx: &MarketContext<'_>, out: &mut Vec<TargetPosition>) {
+            if ctx.index == 0 {
+                out.push(TargetPosition {
+                    symbol: 0,
+                    weight: 0.0,
+                });
+            }
+        }
+
+        fn take_warnings(&mut self) -> Vec<String> {
+            if self.emitted {
+                return Vec::new();
+            }
+            self.emitted = true;
+            vec!["策略告警:测试".into()]
+        }
+    }
+
     fn universe_ohlcv(bars: &[(f64, f64, f64, f64, f64)]) -> Universe {
         assert!(!bars.is_empty());
         let ts: Vec<Ts> = (0..bars.len())
@@ -1084,6 +1225,48 @@ mod tests {
             timeline: ts,
             data_hash: "test".into(),
         }
+    }
+
+    fn universe_two(
+        first: &[(f64, f64, f64, f64, f64)],
+        second: &[(f64, f64, f64, f64, f64)],
+    ) -> Universe {
+        assert_eq!(first.len(), second.len());
+        assert!(!first.is_empty());
+        let n = first.len();
+        let ts: Vec<Ts> = (0..n).map(|index| BASE_TS + index as i64 * DAY).collect();
+        let make_series = |symbol: u32, bars: &[(f64, f64, f64, f64, f64)]| BarSeries {
+            symbol,
+            ts: ts.clone(),
+            open: bars.iter().map(|bar| bar.0).collect(),
+            high: bars.iter().map(|bar| bar.1).collect(),
+            low: bars.iter().map(|bar| bar.2).collect(),
+            close: bars.iter().map(|bar| bar.3).collect(),
+            volume: bars.iter().map(|bar| bar.4).collect(),
+        };
+        let spec = |symbol: &str| InstrumentSpec {
+            symbol: symbol.into(),
+            asset_class: AssetClass::Crypto,
+            currency: "USD".into(),
+            multiplier: 1.0,
+            lot_size: 0.0,
+            margin_rate: 1.0,
+            fee_bps: 0.0,
+            fee_fixed: 0.0,
+            slippage_bps: 0.0,
+            periods_per_year: Some(365),
+        };
+        Universe {
+            timeframe: Timeframe::ONE_DAY,
+            specs: vec![spec("AAA"), spec("BBB")],
+            series: vec![make_series(0, first), make_series(1, second)],
+            timeline: ts,
+            data_hash: "test".into(),
+        }
+    }
+
+    fn flat_bars(price: f64, len: usize) -> Vec<(f64, f64, f64, f64, f64)> {
+        vec![(price, price + 1.0, price - 1.0, price, 1_000_000.0); len]
     }
 
     fn universe(opens: &[f64], closes: &[f64]) -> Universe {
@@ -1508,6 +1691,205 @@ mod tests {
             error,
             Error::Execution(ExecutionError::GrossLimit { .. })
         ));
+    }
+
+    #[test]
+    fn t3_1_two_symbols_hand_calculated() {
+        let first = flat_bars(100.0, 3);
+        let second = flat_bars(50.0, 3);
+        let universe = universe_two(&first, &second);
+        let mut strategy = ScriptedMulti::new(&[(0, 0, 0.5), (0, 1, -0.5)]);
+        let result = run_backtest(&universe, &input(), &mut strategy).expect("run");
+
+        assert_eq!(result.fills.len(), 2);
+        let first_fill = result
+            .fills
+            .iter()
+            .find(|fill| fill.symbol == 0)
+            .expect("first symbol fill");
+        assert_eq!(first_fill.side, Side::Buy);
+        assert!((first_fill.qty - 500.0).abs() < 1e-9);
+        let second_fill = result
+            .fills
+            .iter()
+            .find(|fill| fill.symbol == 1)
+            .expect("second symbol fill");
+        assert_eq!(second_fill.side, Side::Sell);
+        assert!((second_fill.qty - 1000.0).abs() < 1e-9);
+
+        let point = &result.equity[1];
+        assert!((point.cash - 100_000.0).abs() < 1e-9);
+        assert!((point.equity - 100_000.0).abs() < 1e-9);
+        assert!((point.gross_exposure - 100_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t3_2_portfolio_equity_tracks_price_moves() {
+        let first = vec![
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (100.0, 111.0, 99.0, 110.0, 1_000_000.0),
+            (110.0, 111.0, 109.0, 110.0, 1_000_000.0),
+        ];
+        let second = vec![
+            (50.0, 51.0, 49.0, 50.0, 1_000_000.0),
+            (50.0, 51.0, 44.0, 45.0, 1_000_000.0),
+            (45.0, 46.0, 44.0, 45.0, 1_000_000.0),
+        ];
+        let universe = universe_two(&first, &second);
+        let mut strategy = ScriptedMulti::new(&[(0, 0, 0.5), (0, 1, -0.5)]);
+        let result = run_backtest(&universe, &input(), &mut strategy).expect("run");
+
+        assert_eq!(result.fills.len(), 2);
+        let last = result.equity.last().expect("equity");
+        assert!((last.cash - 100_000.0).abs() < 1e-9);
+        assert!((last.equity - 110_000.0).abs() < 1e-9);
+        assert!((last.gross_exposure - 100_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t3_3_rebalance_closes_positions_and_updates_cash() {
+        let first = vec![
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (100.0, 111.0, 99.0, 110.0, 1_000_000.0),
+            (110.0, 111.0, 109.0, 110.0, 1_000_000.0),
+        ];
+        let second = vec![
+            (50.0, 51.0, 49.0, 50.0, 1_000_000.0),
+            (50.0, 51.0, 44.0, 45.0, 1_000_000.0),
+            (45.0, 46.0, 44.0, 45.0, 1_000_000.0),
+        ];
+        let universe = universe_two(&first, &second);
+        let mut strategy =
+            ScriptedMulti::new(&[(0, 0, 0.5), (0, 1, -0.5), (1, 0, 0.0), (1, 1, 0.0)]);
+        let result = run_backtest(&universe, &input(), &mut strategy).expect("run");
+
+        assert_eq!(result.fills.len(), 4);
+        assert_eq!(result.trades.len(), 2);
+        let last = result.equity.last().expect("equity");
+        assert!((last.cash - 110_000.0).abs() < 1e-9);
+        assert!((last.equity - 110_000.0).abs() < 1e-9);
+        assert!(last.gross_exposure.abs() < 1e-9);
+    }
+
+    #[test]
+    fn sells_execute_before_buys_to_free_cash() {
+        // symbol 0 是空头, symbol 1 是多头。若按标的顺序先买回空头, 现金不足;
+        // 先卖出多头再买回空头, 才能完全平仓。
+        let short_side = vec![
+            (50.0, 51.0, 49.0, 50.0, 1_000_000.0),
+            (50.0, 51.0, 49.0, 50.0, 1_000_000.0),
+            (150.0, 151.0, 149.0, 150.0, 1_000_000.0),
+        ];
+        let long_side = vec![
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (110.0, 111.0, 109.0, 110.0, 1_000_000.0),
+        ];
+        let universe = universe_two(&short_side, &long_side);
+        let mut strategy =
+            ScriptedMulti::new(&[(0, 0, -0.5), (0, 1, 0.5), (1, 0, 0.0), (1, 1, 0.0)]);
+        let result = run_backtest(&universe, &input(), &mut strategy).expect("run");
+
+        assert_eq!(result.fills.len(), 4);
+        let last = result.equity.last().expect("equity");
+        assert!(last.gross_exposure.abs() < 1e-9);
+        assert!((last.cash - 5_000.0).abs() < 1e-9);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("现金不足"))
+        );
+    }
+
+    #[test]
+    fn position_reductions_fill_before_new_exposure() {
+        // symbol 0 开新多仓, symbol 1 部分回补空头。空头占用全部保证金,
+        // 若按标的顺序先开多仓会被裁剪;先回补空头释放保证金才能成交。
+        let first = flat_bars(100.0, 3);
+        let second = flat_bars(100.0, 3);
+        let universe = universe_two(&first, &second);
+        let mut strategy = ScriptedMulti::new(&[(0, 1, -1.0), (1, 0, 0.4), (1, 1, -0.5)]);
+        let result = run_backtest(&universe, &input(), &mut strategy).expect("run");
+
+        assert_eq!(result.fills.len(), 3);
+        let cover = result
+            .fills
+            .iter()
+            .find(|fill| fill.symbol == 1 && fill.ts == universe.timeline[2])
+            .expect("partial cover");
+        assert_eq!(cover.side, Side::Buy);
+        assert!((cover.qty - 500.0).abs() < 1e-9);
+        let long = result
+            .fills
+            .iter()
+            .find(|fill| fill.symbol == 0)
+            .expect("new long fill");
+        assert_eq!(long.ts, universe.timeline[2]);
+        assert!((long.qty - 400.0).abs() < 1e-9);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("保证金"))
+        );
+    }
+
+    #[test]
+    fn risk_exits_fill_before_targets_on_the_same_side() {
+        // symbol 0 是策略平仓, symbol 1 是止损卖出。两者都卖, 风险退出应先成交。
+        let first = vec![
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+        ];
+        let second = vec![
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (100.0, 101.0, 99.0, 100.0, 1_000_000.0),
+            (94.0, 95.0, 93.0, 94.0, 1_000_000.0),
+        ];
+        let universe = universe_two(&first, &second);
+        let mut engine_input = input();
+        engine_input.risk = RiskConfig {
+            stop_loss: Some(RiskLeg {
+                trigger: Trigger::Intrabar,
+                distance: 0.05,
+            }),
+            take_profit: None,
+        };
+        let mut strategy = ScriptedMulti::new(&[(0, 0, 0.5), (0, 1, 0.5), (1, 0, 0.0)]);
+        let result = run_backtest(&universe, &engine_input, &mut strategy).expect("run");
+
+        let exits: Vec<&crate::model::FillRecord> = result
+            .fills
+            .iter()
+            .filter(|fill| fill.ts == universe.timeline[2])
+            .collect();
+        assert_eq!(exits.len(), 2);
+        assert_eq!(exits[0].reason, FillReason::StopLoss);
+        assert_eq!(exits[0].symbol, 1);
+        assert_eq!(exits[1].reason, FillReason::Close);
+        assert_eq!(exits[1].symbol, 0);
+    }
+
+    #[test]
+    fn strategy_warnings_reach_result_and_meta() {
+        let universe = universe(&[100.0, 100.0], &[100.0, 100.0]);
+        let mut strategy = Warned { emitted: false };
+        let result = run_backtest(&universe, &input(), &mut strategy).expect("run");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning == "策略告警:测试")
+        );
+        assert!(
+            result
+                .meta
+                .warnings
+                .iter()
+                .any(|warning| warning == "策略告警:测试")
+        );
     }
 
     #[test]
