@@ -1,0 +1,40 @@
+# 单次回测配置示例。复制后修改。
+# 相对路径按运行命令时的 cwd 解析。
+
+[run]
+data = "fixtures/sma_6bars.csv"
+initial_cash = 100000.0
+start = "2020-01-01T00:00:00Z"
+end = "2020-01-07T00:00:00Z"
+output_dir = "out/sma"
+# auto 或正整数
+threads = "auto"
+# 0 表示自动检测
+memory_limit_gb = 0
+# S1 只实现 1d
+timeframe = "1d"
+risk_free_rate = 0.0
+
+[execution]
+# 0 表示不限制；1.0 表示最多吃掉 bar.volume
+participation_rate = 0.0
+
+[strategy]
+name = "sma_cross"
+fast = 2
+slow = 3
+# 目标名义价值 / 权益
+weight = 0.99
+allow_short = false
+
+[[instruments]]
+symbol = "TEST"
+asset_class = "crypto"
+currency = "USD"
+multiplier = 1.0
+lot_size = 0.0
+margin_rate = 1.0
+fee_bps = 0.0
+fee_fixed = 0.0
+slippage_bps = 0.0
+periods_per_year = 365
