@@ -1,0 +1,557 @@
+//! `quant-backtest` 的 CLI 编排。
+//!
+//! 本 crate 只做参数解析、配置/数据装载、引擎调用与报告落盘;
+//! 领域逻辑全部在 `backtest-core`、`backtest-data`、`backtest-strategy`、`backtest-report`。
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Instant;
+
+use backtest_core::config::{RunConfig, ThreadSetting, load_config};
+use backtest_core::engine::{EngineInput, run_backtest};
+use backtest_core::error::{Error, Result};
+use backtest_core::model::{InstrumentSpec, Timeframe, Universe};
+use backtest_core::strategy::Strategy;
+use backtest_core::system::{
+    Capacity, DEFAULT_WORKER_BUDGET_BYTES, ResolvedWorkers, detect_capacity, resolve_workers,
+};
+use backtest_data::{LoadOptions, load_universe};
+use backtest_report::{ReportPaths, write_report};
+use backtest_strategy::{SmaCross, build};
+use chrono::{DateTime, Utc};
+use clap::{Parser, Subcommand};
+use rayon::prelude::*;
+
+const BENCH_TASKS: usize = 500;
+const BENCH_BARS: usize = 2_500;
+const BENCH_REPS: usize = 3;
+const THROUGHPUT_FLOOR_2C: f64 = 1_000_000.0;
+
+#[derive(Parser)]
+#[command(
+    name = "quant-backtest",
+    version,
+    about = "日线级多标的策略回测引擎",
+    long_about = None
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// 校验配置与数据,不执行回测
+    Validate {
+        /// 运行配置 TOML
+        #[arg(long, value_name = "run.toml")]
+        config: PathBuf,
+    },
+    /// 执行一次回测并输出 JSON 与 HTML
+    Run {
+        /// 运行配置 TOML
+        #[arg(long, value_name = "run.toml")]
+        config: PathBuf,
+        /// 覆盖配置中的线程数
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 覆盖配置中的内存上限(GiB)
+        #[arg(long)]
+        memory_limit_gb: Option<f64>,
+        /// 覆盖配置中的输出目录
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// 合成负载吞吐基准
+    Bench {
+        /// 固定线程数
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 依次跑 1/2/4/8 线程
+        #[arg(long)]
+        scale: bool,
+        /// 任务数,默认 500
+        #[arg(long, default_value_t = BENCH_TASKS)]
+        tasks: usize,
+        /// 每个任务的 bar 数,默认 2500
+        #[arg(long, default_value_t = BENCH_BARS)]
+        bars: usize,
+    },
+}
+
+pub fn main_entry() -> ExitCode {
+    let cli = Cli::parse();
+    match dispatch(cli.command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("错误: {error}");
+            ExitCode::from(error.exit_code() as u8)
+        }
+    }
+}
+
+fn dispatch(command: Command) -> Result<()> {
+    match command {
+        Command::Validate { config } => cmd_validate(&config),
+        Command::Run {
+            config,
+            threads,
+            memory_limit_gb,
+            out,
+        } => cmd_run(&config, threads, memory_limit_gb, out),
+        Command::Bench {
+            threads,
+            scale,
+            tasks,
+            bars,
+        } => cmd_bench(threads, scale, tasks, bars),
+    }
+}
+
+fn cmd_validate(path: &Path) -> Result<()> {
+    let config = load_config(path)?;
+    let workers = resolve_for(&config)?;
+    print_capacity(&workers);
+    let universe = load(&config)?;
+    print_universe(&config, &universe);
+    println!("校验通过: {}", path.display());
+    Ok(())
+}
+
+fn cmd_run(
+    path: &Path,
+    threads: Option<usize>,
+    memory_limit_gb: Option<f64>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let mut config = load_config(path)?;
+    config.apply_overrides(threads, memory_limit_gb, out)?;
+    let workers = resolve_for(&config)?;
+    print_capacity(&workers);
+    let universe = load(&config)?;
+    print_universe(&config, &universe);
+
+    let mut strategy = build(&config.strategy, config.instruments.len());
+    let input = EngineInput {
+        initial_cash: config.initial_cash,
+        risk_free_rate: config.risk_free_rate,
+        execution: config.execution,
+        risk: config.risk,
+        strategy_name: config.strategy.name().to_string(),
+        params: config.strategy.params(),
+        config_hash: config.config_hash.clone(),
+        threads: workers.threads,
+        requested_start: config.start,
+        requested_end: config.end,
+    };
+    let result = run_backtest(&universe, &input, strategy.as_mut())?;
+    let paths = write_report(&result, &config.output_dir)?;
+    print_result(&result, &paths);
+    Ok(())
+}
+
+fn cmd_bench(threads: Option<usize>, scale: bool, tasks: usize, bars: usize) -> Result<()> {
+    if tasks == 0 || bars == 0 {
+        return Err(backtest_core::error::ConfigError::Invalid {
+            field: "bench.tasks/bench.bars".into(),
+            message: "必须大于 0".into(),
+        }
+        .into());
+    }
+    let capacity = detect_capacity();
+    let workers = resolve_for_requested(threads, None, &capacity)?;
+    print_capacity(&workers);
+    println!(
+        "基准:任务数 {tasks},每任务 {bars} bar,每个策略重复 {BENCH_REPS} 次,单 worker 预算 {} MiB",
+        DEFAULT_WORKER_BUDGET_BYTES / (1024 * 1024)
+    );
+
+    let thread_list: Vec<usize> = if scale {
+        vec![1, 2, 4, 8]
+    } else {
+        vec![workers.threads]
+    };
+    let universe = Arc::new(synthetic_universe(bars));
+    let mut rates = Vec::new();
+    for thread in thread_list {
+        if thread > capacity.cpu_available {
+            println!(
+                "警告: 线程 {thread} 超过检测到的 {} 核,结果可能受超订影响",
+                capacity.cpu_available
+            );
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(thread)
+            .build()
+            .map_err(|error| backtest_core::error::ConfigError::Invalid {
+                field: "bench.threads".into(),
+                message: error.to_string(),
+            })?;
+        for kind in [BenchKind::Empty, BenchKind::SmaCross] {
+            let rate = measure(&pool, kind, tasks, &universe)?;
+            rates.push((kind.label(), thread, rate));
+            println!(
+                "{:<10} threads={thread:<2} tasks={tasks} bars={bars} reps={BENCH_REPS} throughput={rate:.0} bar步/秒",
+                kind.label()
+            );
+        }
+    }
+
+    for (label, thread, rate) in &rates {
+        if *thread == 2 && *rate < THROUGHPUT_FLOOR_2C {
+            println!(
+                "警告: {label} 在 2 线程下 {rate:.0} bar步/秒,低于门槛 {THROUGHPUT_FLOOR_2C:.0}"
+            );
+        }
+    }
+    println!(
+        "检测:CPU {} 核,可用内存 {}",
+        capacity.cpu_available,
+        capacity
+            .mem_available_bytes
+            .map(format_gib)
+            .unwrap_or_else(|| "未知".into())
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum BenchKind {
+    Empty,
+    SmaCross,
+}
+
+impl BenchKind {
+    fn label(self) -> &'static str {
+        match self {
+            BenchKind::Empty => "空策略",
+            BenchKind::SmaCross => "双均线",
+        }
+    }
+
+    fn make(self) -> Box<dyn Strategy> {
+        match self {
+            BenchKind::Empty => Box::new(EmptyStrategy),
+            BenchKind::SmaCross => Box::new(SmaCross::new(2, 20, 0.99, true, 1)),
+        }
+    }
+}
+
+struct EmptyStrategy;
+
+impl Strategy for EmptyStrategy {
+    fn on_bar(
+        &mut self,
+        _ctx: &backtest_core::strategy::MarketContext<'_>,
+        _out: &mut Vec<backtest_core::strategy::TargetPosition>,
+    ) {
+    }
+}
+
+fn measure(
+    pool: &rayon::ThreadPool,
+    kind: BenchKind,
+    tasks: usize,
+    universe: &Arc<Universe>,
+) -> Result<f64> {
+    let steps = tasks.saturating_mul(universe.len());
+    let started = Instant::now();
+    for _ in 0..BENCH_REPS {
+        let results: Result<Vec<usize>> = pool.install(|| {
+            (0..tasks)
+                .into_par_iter()
+                .map(|_| {
+                    let mut strategy = kind.make();
+                    let input = bench_input();
+                    let result = run_backtest(universe, &input, strategy.as_mut())?;
+                    Ok(result.equity.len())
+                })
+                .collect()
+        });
+        let done: usize = results?.into_iter().sum();
+        if done != steps {
+            return Err(backtest_core::error::ConfigError::Invalid {
+                field: "bench.steps".into(),
+                message: format!("期望 {steps} 步,实际 {done} 步"),
+            }
+            .into());
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    if elapsed <= 0.0 {
+        return Ok(f64::INFINITY);
+    }
+    Ok(steps as f64 * BENCH_REPS as f64 / elapsed)
+}
+
+fn bench_input() -> EngineInput {
+    EngineInput {
+        initial_cash: 100_000.0,
+        risk_free_rate: 0.0,
+        execution: backtest_core::config::ExecutionConfig::default(),
+        risk: backtest_core::config::RiskConfig::default(),
+        strategy_name: "bench".into(),
+        params: std::collections::BTreeMap::new(),
+        config_hash: String::new(),
+        threads: 1,
+        requested_start: None,
+        requested_end: None,
+    }
+}
+
+fn synthetic_universe(bars: usize) -> Universe {
+    let base = 1_600_000_000_000_i64;
+    let day = 86_400_000_i64;
+    let mut ts = Vec::with_capacity(bars);
+    let mut open = Vec::with_capacity(bars);
+    let mut high = Vec::with_capacity(bars);
+    let mut low = Vec::with_capacity(bars);
+    let mut close = Vec::with_capacity(bars);
+    let mut volume = Vec::with_capacity(bars);
+    for index in 0..bars {
+        let wave = (index as f64 / 17.0).sin() * 4.0;
+        let drift = index as f64 * 0.002;
+        let price = 100.0 + wave + drift;
+        ts.push(base + index as i64 * day);
+        open.push(price);
+        high.push(price * 1.01);
+        low.push(price * 0.99);
+        close.push(price);
+        volume.push(1_000_000.0);
+    }
+    let spec = InstrumentSpec {
+        symbol: "SYN".into(),
+        asset_class: backtest_core::model::AssetClass::Crypto,
+        currency: "USD".into(),
+        multiplier: 1.0,
+        lot_size: 0.0,
+        margin_rate: 1.0,
+        fee_bps: 0.0,
+        fee_fixed: 0.0,
+        slippage_bps: 0.0,
+        periods_per_year: Some(365),
+    };
+    Universe {
+        timeframe: Timeframe::ONE_DAY,
+        specs: vec![spec],
+        series: vec![backtest_core::model::BarSeries {
+            symbol: 0,
+            ts: ts.clone(),
+            open,
+            high,
+            low,
+            close,
+            volume,
+        }],
+        timeline: ts,
+        data_hash: String::new(),
+    }
+}
+
+fn resolve_for(config: &RunConfig) -> Result<ResolvedWorkers> {
+    let requested = match config.threads {
+        ThreadSetting::Auto => None,
+        ThreadSetting::Fixed(value) => Some(value),
+    };
+    resolve_for_requested(
+        requested,
+        (config.memory_limit_gb > 0.0).then_some(config.memory_limit_gb),
+        &detect_capacity(),
+    )
+}
+
+fn resolve_for_requested(
+    requested: Option<usize>,
+    memory_limit_gb: Option<f64>,
+    capacity: &Capacity,
+) -> Result<ResolvedWorkers> {
+    let resolved = resolve_workers(
+        requested,
+        memory_limit_gb,
+        capacity,
+        DEFAULT_WORKER_BUDGET_BYTES,
+    )?;
+    for note in &capacity.notes {
+        println!("系统: {note}");
+    }
+    for warning in &resolved.warnings {
+        println!("警告: {warning}");
+    }
+    Ok(resolved)
+}
+
+fn load(config: &RunConfig) -> Result<Universe> {
+    load_universe(&LoadOptions {
+        path: &config.data_path,
+        timeframe: config.timeframe,
+        instruments: &config.instruments,
+        start: config.start,
+        end: config.end,
+    })
+}
+
+fn print_capacity(workers: &ResolvedWorkers) {
+    println!(
+        "线程:自动检测 {} 核,最终使用 {} 线程;内存上限 {}",
+        workers.cpu_available,
+        workers.threads,
+        workers
+            .memory_limit_bytes
+            .map(format_gib)
+            .unwrap_or_else(|| "未知".into())
+    );
+}
+
+fn print_universe(config: &RunConfig, universe: &Universe) {
+    let first = universe.timeline.first().copied().map(format_ts);
+    let last = universe.timeline.last().copied().map(format_ts);
+    println!(
+        "数据:{} 个标的,{} 根 bar,{} 至 {}",
+        universe.symbol_count(),
+        universe.len(),
+        first.unwrap_or_else(|| "—".into()),
+        last.unwrap_or_else(|| "—".into())
+    );
+    println!(
+        "哈希:config={} data={}",
+        config.config_hash, universe.data_hash
+    );
+    println!(
+        "标的:{}",
+        universe
+            .specs
+            .iter()
+            .map(|spec| spec.symbol.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("周期: {}", universe.timeframe);
+}
+
+fn print_result(result: &backtest_core::model::BacktestResult, paths: &ReportPaths) {
+    let metrics = &result.metrics;
+    println!(
+        "结果:总收益 {} CAGR {},最大回撤 {}",
+        format_pct(metrics.total_return),
+        format_pct(metrics.cagr),
+        format_pct(metrics.max_drawdown)
+    );
+    println!(
+        "交易:{} 笔,费用 {:.2},成交 {} 笔",
+        metrics.trades,
+        metrics.total_fees,
+        result.fills.len()
+    );
+    println!("产物:{}", paths.json.display());
+    println!("产物:{}", paths.html.display());
+    if !result.warnings.is_empty() {
+        for warning in &result.warnings {
+            println!("警告: {warning}");
+        }
+    }
+}
+
+fn format_pct(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{:.2}%", value * 100.0))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn format_ts(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ts)
+        .map(|value| value.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+fn format_gib(bytes: u64) -> String {
+    format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// 把任意错误转成退出码,便于测试与嵌入。
+pub fn exit_code(error: &Error) -> u8 {
+    error.exit_code() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_universe_is_well_formed() {
+        let universe = synthetic_universe(64);
+        assert_eq!(universe.len(), 64);
+        for index in 0..universe.len() {
+            let bar = universe.bar(0, index);
+            assert!(bar.low < bar.open);
+            assert!(bar.high > bar.open);
+        }
+    }
+
+    #[test]
+    fn format_helpers_are_stable() {
+        assert_eq!(format_pct(None), "—");
+        assert_eq!(format_pct(Some(0.0123)), "1.23%");
+        assert_eq!(format_gib(2 * 1024 * 1024 * 1024), "2.00 GiB");
+    }
+
+    #[test]
+    fn t1_5_end_to_end_runs_are_deterministic() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let data = root.join("fixtures/sma_6bars.csv");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("run.toml");
+        let out_a = dir.path().join("out-a");
+        let out_b = dir.path().join("out-b");
+        let config = format!(
+            r#"[run]
+data = "{}"
+initial_cash = 100000.0
+start = "2020-01-01T00:00:00Z"
+end = "2020-01-07T00:00:00Z"
+output_dir = "{}"
+threads = 1
+memory_limit_gb = 0
+timeframe = "1d"
+
+[strategy]
+name = "sma_cross"
+fast = 2
+slow = 3
+weight = 0.99
+allow_short = false
+
+[[instruments]]
+symbol = "TEST"
+asset_class = "crypto"
+currency = "USD"
+multiplier = 1.0
+lot_size = 0.0
+margin_rate = 1.0
+fee_bps = 0.0
+fee_fixed = 0.0
+slippage_bps = 0.0
+periods_per_year = 365
+"#,
+            data.display(),
+            out_a.display()
+        );
+        std::fs::write(&config_path, config).expect("write config");
+
+        cmd_run(&config_path, None, None, Some(out_a.clone())).expect("first run");
+        cmd_run(&config_path, None, None, Some(out_b.clone())).expect("second run");
+
+        let a: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(out_a.join("result.json")).expect("json"),
+        )
+        .expect("parse");
+        let b: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(out_b.join("result.json")).expect("json"),
+        )
+        .expect("parse");
+        assert_eq!(a["result_hash"], b["result_hash"]);
+        assert!(out_a.join("report.html").exists());
+        assert!(out_b.join("report.html").exists());
+        assert_eq!(a["schema_version"], "1.0");
+    }
+}

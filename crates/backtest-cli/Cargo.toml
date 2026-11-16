@@ -1,0 +1,27 @@
+[package]
+name = "backtest-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "quant-backtest 命令行入口"
+
+[[bin]]
+name = "quant-backtest"
+path = "src/main.rs"
+
+[dependencies]
+backtest-core = { path = "../backtest-core", version = "0.1.0" }
+backtest-data = { path = "../backtest-data", version = "0.1.0" }
+backtest-report = { path = "../backtest-report", version = "0.1.0" }
+backtest-strategy = { path = "../backtest-strategy", version = "0.1.0" }
+chrono.workspace = true
+clap.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
