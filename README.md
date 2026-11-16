@@ -2,7 +2,7 @@
 
 纯 Rust 的日线级、多标的、可做空策略回测引擎。
 
-- 当前阶段:S1 端到端 MVP + 吞吐基准
+- 当前阶段:S2 成交与风控正确性
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)

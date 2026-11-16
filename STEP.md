@@ -56,3 +56,4 @@ cargo run --release -- bench --scale
 - [03 指标与报告](./STEP.d/03-metrics-report.md)
 - [04 CLI、系统检测与基准](./STEP.d/04-cli-system-bench.md)
 - [05 S1 验收](./STEP.d/05-acceptance.md)
+- [06 S2 风控验收](./STEP.d/06-s2-acceptance.md)
