@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ConfigError, Result};
@@ -272,7 +272,8 @@ fn unknown_param(name: &str) -> crate::error::Error {
     .into()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Objective {
     Sharpe,
     Cagr,
@@ -319,6 +320,46 @@ pub struct SweepConfig {
     pub grid: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowMode {
+    Rolling,
+    Anchored,
+}
+
+impl WindowMode {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "rolling" => Ok(Self::Rolling),
+            "anchored" => Ok(Self::Anchored),
+            other => Err(ConfigError::Unsupported {
+                what: "walk-forward 窗口模式",
+                value: other.to_string(),
+                supported: "rolling, anchored",
+            }
+            .into()),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rolling => "rolling",
+            Self::Anchored => "anchored",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WalkForwardConfig {
+    pub mode: WindowMode,
+    pub train_bars: usize,
+    pub test_bars: usize,
+    pub step_bars: usize,
+    pub embargo_bars: usize,
+    pub warmup_bars: usize,
+    pub objective: Objective,
+}
+
 #[derive(Clone, Debug)]
 pub struct RunConfig {
     pub data_path: PathBuf,
@@ -335,6 +376,7 @@ pub struct RunConfig {
     pub strategy: StrategyConfig,
     pub instruments: Vec<InstrumentSpec>,
     pub sweep: Option<SweepConfig>,
+    pub walk_forward: Option<WalkForwardConfig>,
     pub config_hash: String,
 }
 
@@ -424,6 +466,8 @@ struct RawConfig {
     strategy: RawStrategy,
     #[serde(default)]
     sweep: Option<RawSweep>,
+    #[serde(default)]
+    walk_forward: Option<RawWalkForward>,
     #[serde(default)]
     instruments: Vec<RawInstrument>,
 }
@@ -517,6 +561,25 @@ struct RawSweep {
     oos_split: Option<f64>,
     #[serde(default)]
     grid: BTreeMap<String, Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWalkForward {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    train_bars: Option<usize>,
+    #[serde(default)]
+    test_bars: Option<usize>,
+    #[serde(default)]
+    step_bars: Option<usize>,
+    #[serde(default)]
+    embargo_bars: Option<usize>,
+    #[serde(default)]
+    warmup_bars: Option<usize>,
+    #[serde(default)]
+    objective: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -648,6 +711,7 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
 
     let strategy = parse_strategy(raw.strategy)?;
     let sweep = parse_sweep(raw.sweep, &strategy)?;
+    let walk_forward = parse_walk_forward(raw.walk_forward, &strategy)?;
 
     if raw.instruments.is_empty() {
         return Err(field("instruments", "至少需要一个标的"));
@@ -763,6 +827,7 @@ fn validate(raw: RawConfig) -> Result<RunConfig> {
         strategy,
         instruments,
         sweep,
+        walk_forward,
         config_hash,
     })
 }
@@ -910,6 +975,71 @@ fn parse_sweep(raw: Option<RawSweep>, strategy: &StrategyConfig) -> Result<Optio
         top_k,
         oos_split,
         grid: raw.grid,
+    }))
+}
+
+fn parse_walk_forward(
+    raw: Option<RawWalkForward>,
+    strategy: &StrategyConfig,
+) -> Result<Option<WalkForwardConfig>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mode = match raw.mode {
+        Some(text) => WindowMode::parse(&text)?,
+        None => WindowMode::Rolling,
+    };
+    let train_bars = raw.train_bars.unwrap_or(756);
+    let test_bars = raw.test_bars.unwrap_or(252);
+    let step_bars = raw.step_bars.unwrap_or(test_bars);
+    let embargo_bars = raw.embargo_bars.unwrap_or(1);
+    let warmup_bars = raw.warmup_bars.unwrap_or(60);
+    let objective = match raw.objective {
+        Some(text) => Objective::parse(&text)?,
+        None => Objective::Sharpe,
+    };
+    if train_bars == 0 {
+        return Err(field("walk_forward.train_bars", "必须大于 0"));
+    }
+    if test_bars == 0 {
+        return Err(field("walk_forward.test_bars", "必须大于 0"));
+    }
+    if step_bars < test_bars {
+        return Err(field(
+            "walk_forward.step_bars",
+            "必须大于等于 test_bars;重叠窗口不允许",
+        ));
+    }
+    if warmup_bars == 0 {
+        return Err(field("walk_forward.warmup_bars", "必须大于 0"));
+    }
+    if warmup_bars > train_bars + embargo_bars {
+        return Err(field(
+            "walk_forward.warmup_bars",
+            &format!(
+                "不能超过 train_bars + embargo_bars = {}",
+                train_bars + embargo_bars
+            ),
+        ));
+    }
+    let strategy_warmup = strategy.warmup_bars();
+    if warmup_bars < strategy_warmup {
+        return Err(field(
+            "walk_forward.warmup_bars",
+            &format!(
+                "策略 '{}' 需要至少 {strategy_warmup} 根预热 bar",
+                strategy.name()
+            ),
+        ));
+    }
+    Ok(Some(WalkForwardConfig {
+        mode,
+        train_bars,
+        test_bars,
+        step_bars,
+        embargo_bars,
+        warmup_bars,
+        objective,
     }))
 }
 

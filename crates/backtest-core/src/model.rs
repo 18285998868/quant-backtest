@@ -345,6 +345,7 @@ pub struct Metrics {
     pub expectancy: Option<f64>,
     pub total_fees: f64,
     pub turnover: Option<f64>,
+    pub cost_drag: Option<f64>,
     pub exposure: Option<f64>,
     pub periods_per_year: u32,
     pub risk_free_rate: f64,
@@ -368,11 +369,27 @@ impl Metrics {
             expectancy: None,
             total_fees: 0.0,
             turnover: None,
+            cost_drag: None,
             exposure: None,
             periods_per_year,
             risk_free_rate,
         }
     }
+}
+
+/// 搜参校正后的 Deflated Sharpe Ratio。
+///
+/// `probability` 即 DSR;其余字段用于在报告中复核输入。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeflatedSharpe {
+    pub probability: f64,
+    pub trials: usize,
+    pub sharpe_per_period: f64,
+    pub expected_max_sharpe: f64,
+    pub trial_sharpe_variance: f64,
+    pub skewness: f64,
+    pub kurtosis: f64,
+    pub observations: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

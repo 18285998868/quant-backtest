@@ -22,6 +22,12 @@ pub struct EngineInput {
     pub threads: usize,
     pub requested_start: Option<Ts>,
     pub requested_end: Option<Ts>,
+    /// 第一根喂给策略的 bar;之前的数据不参与本次运行。
+    pub start_index: usize,
+    /// 第一根允许交易并记录权益的 bar;`[start_index, trade_start_index)` 只预热。
+    pub trade_start_index: usize,
+    /// 结束下标,不含。
+    pub end_index: usize,
 }
 
 #[derive(Default)]
@@ -80,6 +86,9 @@ struct Engine<'a> {
     positions: Vec<Position>,
     pending: Vec<Option<PendingOrder>>,
     target_weights: Vec<f64>,
+    start_index: usize,
+    trade_start_index: usize,
+    end_index: usize,
     equity: Vec<EquityPoint>,
     fills: Vec<FillRecord>,
     trades: Vec<TradeRecord>,
@@ -103,6 +112,35 @@ pub fn run_backtest(
         }
         .into());
     }
+    let total = universe.len();
+    let end_index = input.end_index.min(total);
+    if input.start_index >= end_index {
+        return Err(ConfigError::Invalid {
+            field: "range.start_index".into(),
+            message: format!("必须在 [0, {end_index}) 内,实际 {}", input.start_index),
+        }
+        .into());
+    }
+    if end_index <= input.start_index {
+        return Err(ConfigError::Invalid {
+            field: "range.end_index".into(),
+            message: format!(
+                "必须大于 start_index {},实际 {}",
+                input.start_index, input.end_index
+            ),
+        }
+        .into());
+    }
+    if input.trade_start_index < input.start_index || input.trade_start_index >= end_index {
+        return Err(ConfigError::Invalid {
+            field: "range.trade_start_index".into(),
+            message: format!(
+                "必须在 [{}, {end_index}) 内,实际 {}",
+                input.start_index, input.trade_start_index
+            ),
+        }
+        .into());
+    }
     let n = universe.symbol_count();
     let mut engine = Engine {
         universe,
@@ -111,7 +149,10 @@ pub fn run_backtest(
         positions: (0..n).map(|_| Position::default()).collect(),
         pending: (0..n).map(|_| None).collect(),
         target_weights: vec![0.0; n],
-        equity: Vec::with_capacity(universe.len()),
+        start_index: input.start_index,
+        trade_start_index: input.trade_start_index,
+        end_index,
+        equity: Vec::with_capacity(end_index - input.trade_start_index),
         fills: Vec::new(),
         trades: Vec::new(),
         warnings: Vec::new(),
@@ -135,15 +176,16 @@ pub fn run_backtest(
 
 impl Engine<'_> {
     fn run(&mut self, strategy: &mut dyn Strategy) -> Result<BacktestResult> {
-        for index in 0..self.universe.len() {
+        for index in self.start_index..self.end_index {
+            let trading = index >= self.trade_start_index;
             let ts = self.universe.timeline[index];
             self.begin_bar();
             self.scan_open_risk(index)?;
             self.process_open(index, ts)?;
             self.process_intrabar_risk(index, ts)?;
-            self.mark_close(index, ts);
+            self.mark_close(index, ts, trading);
             self.queue_close_risk(index);
-            self.run_strategy(index, ts, strategy)?;
+            self.run_strategy(index, ts, strategy, trading)?;
         }
         for (symbol, order) in self.pending.iter().enumerate() {
             if let Some(order) = order {
@@ -179,8 +221,8 @@ impl Engine<'_> {
                 .collect(),
             requested_start: self.input.requested_start,
             requested_end: self.input.requested_end,
-            first_bar_ts: self.universe.timeline.first().copied(),
-            last_bar_ts: self.universe.timeline.last().copied(),
+            first_bar_ts: self.equity.first().map(|point| point.ts),
+            last_bar_ts: self.equity.last().map(|point| point.ts),
             timeframe: self.universe.timeframe.to_string(),
             config_hash: self.input.config_hash.clone(),
             data_hash: self.universe.data_hash.clone(),
@@ -806,7 +848,7 @@ impl Engine<'_> {
         Some(trade)
     }
 
-    fn mark_close(&mut self, index: usize, ts: Ts) {
+    fn mark_close(&mut self, index: usize, ts: Ts, record: bool) {
         let mut equity = self.cash;
         let mut gross = 0.0;
         for (symbol, position) in self.positions.iter().enumerate() {
@@ -820,6 +862,9 @@ impl Engine<'_> {
             view.mark = close;
             view.stop = position.stop;
             view.take_profit = position.take_profit;
+        }
+        if !record {
+            return;
         }
         if !equity.is_finite() {
             self.warnings
@@ -842,7 +887,13 @@ impl Engine<'_> {
         });
     }
 
-    fn run_strategy(&mut self, index: usize, ts: Ts, strategy: &mut dyn Strategy) -> Result<()> {
+    fn run_strategy(
+        &mut self,
+        index: usize,
+        ts: Ts,
+        strategy: &mut dyn Strategy,
+        trading: bool,
+    ) -> Result<()> {
         let equity = self
             .equity
             .last()
@@ -859,8 +910,11 @@ impl Engine<'_> {
         self.targets.clear();
         strategy.on_bar(&ctx, &mut self.targets);
         let strategy_warnings = strategy.take_warnings();
-        if !strategy_warnings.is_empty() {
+        if trading && !strategy_warnings.is_empty() {
             self.warnings.extend(strategy_warnings);
+        }
+        if !trading {
+            return Ok(());
         }
         self.updates.fill(None);
         for target in &self.targets {
@@ -1313,6 +1367,9 @@ mod tests {
             threads: 1,
             requested_start: None,
             requested_end: None,
+            start_index: 0,
+            trade_start_index: 0,
+            end_index: usize::MAX,
         }
     }
 
@@ -1889,6 +1946,86 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning == "策略告警:测试")
+        );
+    }
+
+    #[test]
+    fn warmup_bars_feed_strategy_without_trading() {
+        struct Recorder {
+            seen: Vec<usize>,
+        }
+
+        impl Strategy for Recorder {
+            fn on_bar(&mut self, ctx: &MarketContext<'_>, _out: &mut Vec<TargetPosition>) {
+                self.seen.push(ctx.index);
+            }
+        }
+
+        let universe = universe(&[100.0; 20], &[100.0; 20]);
+        let mut strategy = Recorder { seen: Vec::new() };
+        let mut engine_input = input();
+        engine_input.start_index = 0;
+        engine_input.trade_start_index = 10;
+        engine_input.end_index = 20;
+        let result = run_backtest(&universe, &engine_input, &mut strategy).expect("run");
+
+        assert_eq!(
+            strategy.seen,
+            (0..20).collect::<Vec<_>>(),
+            "预热与交易段都必须按全局下标喂给策略"
+        );
+        assert_eq!(result.equity.len(), 10);
+        assert_eq!(result.equity[0].ts, universe.timeline[10]);
+        assert_eq!(result.meta.first_bar_ts, Some(universe.timeline[10]));
+        assert_eq!(result.meta.last_bar_ts, Some(universe.timeline[19]));
+        assert!(result.fills.is_empty());
+    }
+
+    #[test]
+    fn t5_10_warmup_orders_are_ignored_and_metrics_start_at_trade_start() {
+        let universe = universe(&[100.0; 20], &[100.0; 20]);
+        // 第 5、9 根属于预热,第 10 根是首个可交易 bar(订单在 11 开盘成交)。
+        let mut strategy = Scripted::new(&[(5, 0.5), (9, 0.5), (10, 0.5)]);
+        let mut engine_input = input();
+        engine_input.start_index = 0;
+        engine_input.trade_start_index = 10;
+        engine_input.end_index = 20;
+        let result = run_backtest(&universe, &engine_input, &mut strategy).expect("run");
+
+        assert_eq!(result.equity.len(), 10);
+        assert_eq!(result.equity[0].equity, 100_000.0);
+        assert_eq!(result.fills.len(), 1);
+        assert_eq!(result.fills[0].ts, universe.timeline[11]);
+        assert_eq!(result.metrics.exposure, Some(0.9));
+        assert!(
+            result
+                .equity
+                .iter()
+                .all(|point| point.ts >= universe.timeline[10])
+        );
+    }
+
+    #[test]
+    fn t5_13_training_warmup_uses_pre_range_history_only() {
+        let universe = universe(&[100.0; 40], &[100.0; 40]);
+        // [20, 30) 是训练预热, [30, 40) 才允许交易并记录训练指标。
+        let mut strategy = Scripted::new(&[(20, 0.5), (29, 0.5), (30, 0.5)]);
+        let mut engine_input = input();
+        engine_input.start_index = 20;
+        engine_input.trade_start_index = 30;
+        engine_input.end_index = 40;
+        let result = run_backtest(&universe, &engine_input, &mut strategy).expect("run");
+
+        assert_eq!(result.equity.len(), 10);
+        assert_eq!(result.equity[0].ts, universe.timeline[30]);
+        assert_eq!(result.meta.first_bar_ts, Some(universe.timeline[30]));
+        assert_eq!(result.fills.len(), 1);
+        assert_eq!(result.fills[0].ts, universe.timeline[31]);
+        assert!(
+            result
+                .equity
+                .iter()
+                .all(|point| point.ts >= universe.timeline[30])
         );
     }
 

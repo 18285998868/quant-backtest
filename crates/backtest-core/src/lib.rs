@@ -9,5 +9,6 @@ pub mod metrics;
 pub mod model;
 pub mod strategy;
 pub mod system;
+pub mod walkforward;
 
 pub use error::{Error, Result};

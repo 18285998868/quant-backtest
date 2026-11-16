@@ -38,6 +38,9 @@ fn input() -> EngineInput {
         threads: 1,
         requested_start: None,
         requested_end: None,
+        start_index: 0,
+        trade_start_index: 0,
+        end_index: usize::MAX,
     }
 }
 

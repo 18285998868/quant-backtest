@@ -17,13 +17,14 @@ use backtest_core::system::{
     Capacity, DEFAULT_WORKER_BUDGET_BYTES, ResolvedWorkers, detect_capacity, resolve_workers,
 };
 use backtest_data::{LoadOptions, load_universe};
-use backtest_report::{ReportPaths, write_report};
+use backtest_report::{ReportExtras, ReportPaths, write_report};
 use backtest_strategy::{SmaCross, build};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 
 mod sweep;
+mod walkforward;
 
 const BENCH_TASKS: usize = 500;
 const BENCH_BARS: usize = 2_500;
@@ -69,6 +70,21 @@ enum Command {
     Sweep {
         /// 扫描配置 TOML
         #[arg(long, value_name = "sweep.toml")]
+        config: PathBuf,
+        /// 覆盖配置中的线程数
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 覆盖配置中的内存上限(GiB)
+        #[arg(long)]
+        memory_limit_gb: Option<f64>,
+        /// 覆盖配置中的输出目录
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Walk-forward 逐窗选参并输出 OOS 报告
+    Walkforward {
+        /// walk-forward 配置 TOML(需同时含 [sweep] 与 [walk_forward])
+        #[arg(long, value_name = "walkforward.toml")]
         config: PathBuf,
         /// 覆盖配置中的线程数
         #[arg(long)]
@@ -126,6 +142,12 @@ fn dispatch(command: Command) -> Result<()> {
             memory_limit_gb,
             out,
         } => cmd_sweep(&config, threads, memory_limit_gb, out),
+        Command::Walkforward {
+            config,
+            threads,
+            memory_limit_gb,
+            out,
+        } => cmd_walkforward(&config, threads, memory_limit_gb, out),
         Command::Bench {
             threads,
             scale,
@@ -171,9 +193,13 @@ fn cmd_run(
         threads: workers.threads,
         requested_start: config.start,
         requested_end: config.end,
+        start_index: 0,
+        trade_start_index: 0,
+        end_index: universe.len(),
     };
     let result = run_backtest(&universe, &input, strategy.as_mut())?;
-    let paths = write_report(&result, &config.output_dir)?;
+    let extras = ReportExtras::default();
+    let paths = write_report(&result, &extras, &config.output_dir)?;
     print_result(&result, &paths);
     Ok(())
 }
@@ -236,6 +262,73 @@ fn cmd_sweep(
     println!("哈希:sweep={}", summary.sweep_hash);
     println!("产物:{}", paths.csv.display());
     println!("产物:{}", paths.json.display());
+    let extras = ReportExtras {
+        sweep: Some(run.report),
+        walk_forward: None,
+    };
+    let report_paths = write_report(&run.best_full, &extras, &config.output_dir)?;
+    println!("产物:{}", report_paths.json.display());
+    println!("产物:{}", report_paths.html.display());
+    Ok(())
+}
+
+fn cmd_walkforward(
+    path: &Path,
+    threads: Option<usize>,
+    memory_limit_gb: Option<f64>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let mut config = load_config(path)?;
+    if config.sweep.is_none() {
+        return Err(backtest_core::error::ConfigError::Invalid {
+            field: "sweep".into(),
+            message: "配置缺少 [sweep] 段".into(),
+        }
+        .into());
+    }
+    let wf =
+        config
+            .walk_forward
+            .clone()
+            .ok_or_else(|| backtest_core::error::ConfigError::Invalid {
+                field: "walk_forward".into(),
+                message: "配置缺少 [walk_forward] 段".into(),
+            })?;
+    config.apply_overrides(threads, memory_limit_gb, out)?;
+    let workers = resolve_for(&config)?;
+    print_capacity(&workers);
+    let universe = load(&config)?;
+    print_universe(&config, &universe);
+    let run = walkforward::execute(&config, &wf, &universe, &workers)?;
+    let result = &run.result;
+    println!(
+        "窗口:{} 个,跳过 {} 个,目标 {}",
+        result.windows.len(),
+        result.skipped_windows.len(),
+        result.objective
+    );
+    println!(
+        "OOS:总收益={} sharpe={} maxdd={} 交易={}",
+        format_opt(result.oos_metrics.total_return),
+        format_opt(result.oos_metrics.sharpe),
+        format_opt(result.oos_metrics.max_drawdown),
+        result.oos_metrics.trades
+    );
+    if let Some(dsr) = &result.dsr {
+        println!(
+            "DSR:{} (N={}, 每期 SR={})",
+            format_opt(Some(dsr.probability)),
+            dsr.trials,
+            format_opt(Some(dsr.sharpe_per_period))
+        );
+    }
+    let extras = ReportExtras {
+        sweep: None,
+        walk_forward: Some(run.result),
+    };
+    let paths = write_report(&run.base, &extras, &config.output_dir)?;
+    println!("产物:{}", paths.json.display());
+    println!("产物:{}", paths.html.display());
     Ok(())
 }
 
@@ -420,6 +513,9 @@ fn bench_input() -> EngineInput {
         threads: 1,
         requested_start: None,
         requested_end: None,
+        start_index: 0,
+        trade_start_index: 0,
+        end_index: usize::MAX,
     }
 }
 
@@ -680,6 +776,6 @@ periods_per_year = 365
         assert_eq!(a["result_hash"], b["result_hash"]);
         assert!(out_a.join("report.html").exists());
         assert!(out_b.join("report.html").exists());
-        assert_eq!(a["schema_version"], "1.0");
+        assert_eq!(a["schema_version"], "1.1");
     }
 }

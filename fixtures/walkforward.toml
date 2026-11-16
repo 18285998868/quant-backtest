@@ -1,0 +1,46 @@
+[run]
+data = "fixtures/s5_daily.csv"
+initial_cash = 100000.0
+start = "2020-01-01T00:00:00Z"
+end = "2021-03-01T00:00:00Z"
+output_dir = "out/s5-walkforward"
+threads = "auto"
+memory_limit_gb = 0
+timeframe = "1d"
+
+[strategy]
+name = "sma_cross"
+fast = 5
+slow = 20
+weight = 0.99
+allow_short = false
+
+[sweep]
+objective = "sharpe"
+top_k = 10
+oos_split = 0.7
+
+[sweep.grid]
+fast = [3, 5, 8, 10]
+slow = [13, 20, 30, 40]
+
+[walk_forward]
+mode = "rolling"
+train_bars = 180
+test_bars = 60
+step_bars = 60
+embargo_bars = 1
+warmup_bars = 40
+objective = "sharpe"
+
+[[instruments]]
+symbol = "TEST"
+asset_class = "crypto"
+currency = "USD"
+multiplier = 1.0
+lot_size = 0.0
+margin_rate = 1.0
+fee_bps = 2.0
+fee_fixed = 0.0
+slippage_bps = 1.0
+periods_per_year = 365

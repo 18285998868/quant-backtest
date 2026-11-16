@@ -1,0 +1,123 @@
+{
+  "schema_version": "1.1",
+  "report_kind": "run",
+  "result_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "meta": {
+    "strategy": "sma_cross",
+    "params": {
+      "fast": 5,
+      "slow": 20
+    },
+    "symbols": [
+      "TEST"
+    ],
+    "requested_start": null,
+    "requested_end": null,
+    "first_bar_ts": 1577836800000,
+    "last_bar_ts": 1578009600000,
+    "timeframe": "1d",
+    "config_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "data_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "threads": 1,
+    "walk_forward_window": null,
+    "engine_version": "0.1.0",
+    "generated_at": "2026-11-16T00:00:00Z",
+    "warnings": []
+  },
+  "metrics": {
+    "total_return": 0.1,
+    "cagr": 0.08,
+    "annual_volatility": 0.12,
+    "sharpe": 0.8,
+    "sortino": 1.1,
+    "max_drawdown": 0.05,
+    "max_drawdown_duration_days": 2.0,
+    "calmar": 1.6,
+    "ulcer": 0.02,
+    "trades": 1,
+    "win_rate": 1.0,
+    "profit_factor": null,
+    "expectancy": 10000.0,
+    "total_fees": 5.0,
+    "turnover": 0.5,
+    "cost_drag": 0.001,
+    "exposure": 0.5,
+    "periods_per_year": 365,
+    "risk_free_rate": 0.0
+  },
+  "equity": [
+    {
+      "ts": 1577836800000,
+      "equity": 100000.0,
+      "cash": 100000.0,
+      "gross_exposure": 0.0,
+      "drawdown": 0.0
+    },
+    {
+      "ts": 1577923200000,
+      "equity": 105000.0,
+      "cash": 5000.0,
+      "gross_exposure": 100000.0,
+      "drawdown": 0.0
+    },
+    {
+      "ts": 1578009600000,
+      "equity": 110000.0,
+      "cash": 110000.0,
+      "gross_exposure": 0.0,
+      "drawdown": 0.0
+    }
+  ],
+  "underwater": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "equity_downsampled": null,
+  "drawdowns": [
+    {
+      "peak_ts": 1577836800000,
+      "trough_ts": 1577923200000,
+      "recovery_ts": 1578009600000,
+      "depth": 0.05,
+      "duration_days": 2.0,
+      "recovered": true
+    }
+  ],
+  "monthly": [
+    {
+      "year": 2020,
+      "month": 1,
+      "return_pct": 0.1
+    }
+  ],
+  "trades": [
+    {
+      "symbol": 0,
+      "side": "Buy",
+      "entry_ts": 1577923200000,
+      "exit_ts": 1578009600000,
+      "entry_price": 100.0,
+      "exit_price": 110.0,
+      "qty": 1000.0,
+      "pnl": 10000.0,
+      "fees": 5.0,
+      "return_pct": 0.1,
+      "bars_held": 1,
+      "exit_reason": "Close"
+    }
+  ],
+  "costs": {
+    "total_fees": 5.0,
+    "total_slippage": 0.0,
+    "fills": 2,
+    "turnover": 0.5,
+    "cost_drag": 0.001
+  },
+  "sweep": null,
+  "walk_forward": null,
+  "assumptions": [
+    "示例夹具仅用于 schema 校验,不代表策略有效性。"
+  ],
+  "warnings": []
+}

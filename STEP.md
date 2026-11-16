@@ -10,6 +10,8 @@
 - 风控冒烟:`config/01.risk-smoke.toml`
 - 组合冒烟:`config/02.portfolio-smoke.toml`
 - 扫描冒烟:`config/03.sweep.toml`
+- 样本外冒烟:`fixtures/sweep.toml`
+- walk-forward 冒烟:`fixtures/walkforward.toml`
 
 ## 命令
 
@@ -17,7 +19,8 @@
 | --- | --- |
 | `quant-backtest validate --config <run.toml>` | 校验配置与数据 |
 | `quant-backtest run --config <run.toml>` | 单次回测,输出 JSON 与 HTML |
-| `quant-backtest sweep --config <sweep.toml>` | 参数扫描,输出 `sweep.csv` 与 `sweep_summary.json` |
+| `quant-backtest sweep --config <sweep.toml>` | 参数扫描 + 70/30 样本外,输出 `sweep.csv`、`sweep_summary.json`、`result.json`、`report.html` |
+| `quant-backtest walkforward --config <walkforward.toml>` | 逐窗选参与 OOS 拼接,输出 `result.json` 与 `report.html` |
 | `quant-backtest bench` | 合成负载吞吐基准 |
 | `quant-backtest bench --scale` | 1/2/4/8 线程缩放基准 |
 
@@ -35,9 +38,20 @@ CLI
 
 sweep
   -> 展开 [sweep.grid]
-  -> 并行跑全部组合,只保留指标
+  -> 样本内 [0, split) 并行跑全部组合,只保留指标
   -> 按目标排序
-  -> 重跑 top-K,写 sweep.csv + sweep_summary.json
+  -> 重跑 top-K,写完整曲线
+  -> 样本外 [split, len) 带预热重跑前 100 名
+  -> 排名相关、DSR、边际效应、热力图
+  -> 写 sweep.csv + sweep_summary.json + result.json + report.html
+
+walkforward
+  -> 按 [walk_forward] 切分 rolling/anchored 窗口
+  -> 每窗训练集网格选参(可用预热)
+  -> 测试集带预热重跑最优参数
+  -> 测试段收益复利拼接
+  -> 参数稳定性、DSR、窗口/空档/跳过统计
+  -> 写 result.json + report.html
 ```
 
 ## 退出码
@@ -58,6 +72,8 @@ cargo run --release -- run --config config/00.smoke.toml
 cargo run --release -- run --config config/01.risk-smoke.toml
 cargo run --release -- run --config config/02.portfolio-smoke.toml
 cargo run --release -- sweep --config config/03.sweep.toml
+cargo run --release -- sweep --config fixtures/sweep.toml
+cargo run --release -- walkforward --config fixtures/walkforward.toml
 cargo run --release -- bench --scale
 ```
 
@@ -72,3 +88,4 @@ cargo run --release -- bench --scale
 - [06 S2 风控验收](./STEP.d/06-s2-acceptance.md)
 - [07 S3 组合验收](./STEP.d/07-s3-acceptance.md)
 - [08 S4 扫描验收](./STEP.d/08-s4-acceptance.md)
+- [09 S5 指标与报告验收](./STEP.d/09-s5-acceptance.md)

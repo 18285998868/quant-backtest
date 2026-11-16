@@ -2,7 +2,7 @@
 
 纯 Rust 的日线级、多标的、可做空策略回测引擎。
 
-- 当前阶段:S4 参数扫描与缩放基准
+- 当前阶段:S5 指标、报告与 walk-forward
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -20,8 +20,13 @@ cargo run --release -- validate --config config/00.smoke.toml
 cargo run --release -- run --config config/00.smoke.toml
 cargo run --release -- run --config config/02.portfolio-smoke.toml
 cargo run --release -- sweep --config config/03.sweep.toml
+cargo run --release -- sweep --config fixtures/sweep.toml
+cargo run --release -- walkforward --config fixtures/walkforward.toml
 cargo run --release -- bench --scale
 ```
+
+`sweep` 与 `walkforward` 各自输出 `result.json` 与 `report.html`;
+`sweep` 另输出 `sweep.csv` 与 `sweep_summary.json`。报告为单文件离线 HTML,固定 10 章。
 
 ## 测试
 

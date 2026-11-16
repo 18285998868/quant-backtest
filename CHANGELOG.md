@@ -22,6 +22,13 @@
 - S4:扫描结果规范化 `sweep_hash`,排除线程数、时间与内存等运行时字段。
 - S4:`bench --symbols`,按 symbol-bar 计吞吐,输出每任务耗时与外推时间。
 - S4:S4 冒烟配置 `config/03.sweep.toml` 与验收文档 `STEP.d/08-s4-acceptance.md`。
+- S5:指标补全 `cost_drag`、DSR(含正态 CDF/分位数自实现)、空值规则与已知值测试。
+- S5:引擎新增 `start_index`/`trade_start_index`/`end_index`,预热只喂策略、不交易、不计入指标。
+- S5:`sweep` 接入 70/30 样本外、Spearman 排名相关、DSR、参数边际效应与两参数热力图。
+- S5:报告 schema 1.1、10 章离线 HTML、`validate_report_json`、下采样与 `result.json.sweep` 接入。
+- S5:walk-forward 纯函数与 `walkforward` 子命令,支持 rolling/anchored、embargo、warmup、OOS 拼接与参数稳定性。
+- S5:夹具 `fixtures/s5_daily.csv`、`fixtures/sweep.toml`、`fixtures/walkforward.toml`、`fixtures/report_case.json`。
+- S5:变更说明 `docs/changes/004-report-walkforward.md` 与验收文档 `STEP.d/09-s5-acceptance.md`。
 
 ### 验收
 
