@@ -79,6 +79,9 @@
 - 4 标的组合 179 次结算,`by_symbol` 成本与次数之和等于总账,
   1/2 线程 `result_hash` 同为 `766b917f...`。
 - `funding = false` 结果无资金费字段且 `config_hash` 不变;spot 冒烟保持 `d771891d...`。
+- 提交 `558be63` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(159 个)与 `cargo build --release --locked`;
+  `fund_1h` 与 spot 冒烟哈希与工作副本一致。
 - 2026-11-16:M1 验收,138 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release build 与 `scripts/check.sh --ci` 全部通过。
 - 1h 冒烟 `result_hash` 为 `68707c00...`,年化因子 8760,2 笔交易;1w 冒烟 `result_hash` 为 `fee172be...`,年化因子 52。
 - 1h 扫描 `sweep_hash` 为 `359ad35d...`(4 组/3 有效/1 跳过),walk-forward `result_hash` 为 `ca243a95...`(2 窗口/2 跳过)。

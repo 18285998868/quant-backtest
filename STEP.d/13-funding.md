@@ -209,6 +209,18 @@ inverse_vol, gross=0.95)`,`threads = 1/2`。
 | `nofund_1h` | 1 | `bbcc3760...` |
 | `config/00.smoke.toml` | auto | `d771891d...` |
 
+## 干净克隆
+
+把提交 `558be63` 克隆到与 `data-reader` 同级的全新目录后验收:
+
+- `cargo test --workspace --locked`:159 个通过,0 失败;
+- `cargo build --release --locked`:成功;
+- path 依赖 `../../../data-reader/crates/binance-core` 与锁文件在全新工作区
+  可解析;
+- `fund_1h` 克隆运行 `result_hash=695e40ef...`,资金费净支出
+  `-34.92654974212712`、87 次,与工作副本一致;
+- `config/00.smoke.toml` 克隆运行 `result_hash=d771891d...`,未产生资金费字段。
+
 ## 相关文档
 
 - [流程设计 §3.1、§3.7、§3.9 与 M3](../docs/03-流程设计.md)
