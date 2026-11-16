@@ -66,6 +66,8 @@
 - Binance BTCUSDT 1h 归档与等价 CSV 的 `data_hash`、`result_hash` 完全一致;
   1m 2023-06 为 43200 根,4 标的 1h 组合为 744 根,Dukascopy EURUSD H1 为 743 根。
 - M2 归档冒烟 1/2 线程与重复运行 `result_hash` 一致;`cargo audit` 扫描 131 个依赖无漏洞报告。
+- 提交 `22979ff` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked` 与 `cargo build --release --locked`。
 - 2026-11-16:M1 验收,138 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release build 与 `scripts/check.sh --ci` 全部通过。
 - 1h 冒烟 `result_hash` 为 `68707c00...`,年化因子 8760,2 笔交易;1w 冒烟 `result_hash` 为 `fee172be...`,年化因子 52。
 - 1h 扫描 `sweep_hash` 为 `359ad35d...`(4 组/3 有效/1 跳过),walk-forward `result_hash` 为 `ca243a95...`(2 窗口/2 跳过)。

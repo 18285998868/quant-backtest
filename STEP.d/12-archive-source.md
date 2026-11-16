@@ -67,6 +67,10 @@ cargo build --release --locked
 结果:151 个测试全部通过;fmt、check、clippy、doctest、rustdoc、deny、
 audit 与 release 构建全部通过。
 
+提交 `22979ff` 的干净克隆(与 `data-reader` 同级)同样通过
+`cargo test --workspace --locked` 与 `cargo build --release --locked`,
+确认 path 依赖与锁文件在全新工作区可用。
+
 ## 真实数据结果
 
 | 场景 | 数据 | bar 数 | `data_hash` | `result_hash` |

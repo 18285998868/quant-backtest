@@ -55,6 +55,8 @@ Binance/Dukascopy 归档,不再强制先导出 CSV。此前的加载器只接受
 - Dukascopy EURUSD H1(2023-07)743 根 bar;缺失的上月归档文件进入诊断,
   不静默补齐。
 - 1/2 线程、重复运行 `result_hash` 一致。
+- 提交 `22979ff` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked` 与 `cargo build --release --locked`。
 - 详细证据见 [M2 验收](../../STEP.d/12-archive-source.md)。
 
 ## 限制

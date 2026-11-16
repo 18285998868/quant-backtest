@@ -21,8 +21,9 @@
 | toml | 1.2.1+spec-1.1.0 | MIT OR Apache-2.0 |
 
 `tempfile` 只用于测试。`binance-core` 与 `dukascopy-core` 通过 path 依赖
-引入同级仓库 `data-reader`,固定提交为 `a844ea02e7fd43b73f9e5b9fe5d619e6cbe8ea21`
-(2026-11-16),两者均为 MIT。完整传递依赖及精确版本见 [Cargo.lock](./Cargo.lock)。
+引入同级仓库 `data-reader`,验收时对应提交为
+`a844ea02e7fd43b73f9e5b9fe5d619e6cbe8ea21`(2026-11-16),两者均为 MIT。
+完整传递依赖及精确版本见 [Cargo.lock](./Cargo.lock)。
 
 ## 许可检查
 
