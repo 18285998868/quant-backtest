@@ -51,8 +51,8 @@ target/release/quant-backtest run --config config/05.weekly.toml --threads 1 --o
 
 | 配置 | 结果 |
 | --- | --- |
-| 1h | `result_hash=68707c00e452fd4606e39c44fefc9cacac64bcfd3f29e4dd9e0e601dc847f629` |
-| 1w | `result_hash=fee172be94551b25f905713ca399a5798bea43a09360e07a2e6e827de3f937f3` |
+| 1h | `result_hash=7c680a05ae883f02dd8b8a4428a13afc570c86a4d7f16db2badf5a8210b30f86` |
+| 1w | `result_hash=7c4c0da1569dea4018d393ef115f5765493e9c9b367148b0c6d2b5efcde9002f` |
 
 1h 冒烟结果:总收益 1.98%,CAGR 175760.97%,最大回撤 1.92%,2 笔交易。
 周线窗口短,CAGR 只用于验证公式,不代表策略有效性。
@@ -82,13 +82,13 @@ warmup_bars = 5
 结果:
 
 - 扫描 4 组,3 有效,1 组因 `fast >= slow` 跳过;`sweep_hash` 为
-  `359ad35db505637b4c91aadced18cdde8a36f8b535838aaac44da98496e17385`。
+  `93ea6a6d81bdffad2471956ec9f9177b24957f9a04fd3865cbc89fe76e19bbda`。
 - OOS 切分 0.7,切分下标 17,OOS 年化因子 8760,排名相关 1.0。
 - walk-forward 2 个有效窗口、2 个跳过;跳过原因为首窗训练预热不足与尾窗超界。
 - 窗口 0 train 4..12、test 13..17;窗口 1 train 8..16、test 17..21。
 - 两窗最优参数均为 `fast=2, slow=3`;OOS 年化因子 8760。
 - walk-forward `result_hash` 为
-  `ca243a958171966f2bb16e0910e6591bd72090639dffb5617bd36527edd90492`。
+  `0a6e9982656d8383eff4a8b58fa4b818ea09a8d8608dabd0c699fd436d013150`。
 
 ## 内存估算
 
@@ -138,18 +138,18 @@ target/release/quant-backtest run --config config/05.weekly.toml --threads 1 --o
 ```
 
 - 测试:138 个通过,0 失败;release 构建成功。
-- 1h 克隆运行 `result_hash=68707c00e452fd4606e39c44fefc9cacac64bcfd3f29e4dd9e0e601dc847f629`。
-- 1w 克隆运行 `result_hash=fee172be94551b25f905713ca399a5798bea43a09360e07a2e6e827de3f937f3`。
+- 1h 克隆运行 `result_hash=7c680a05ae883f02dd8b8a4428a13afc570c86a4d7f16db2badf5a8210b30f86`。
+- 1w 克隆运行 `result_hash=7c4c0da1569dea4018d393ef115f5765493e9c9b367148b0c6d2b5efcde9002f`。
 - 克隆运行的周期、年化因子与权益点数与工作副本一致。
 
 ## 回归
 
 | 配置 | `result_hash` |
 | --- | --- |
-| `config/00.smoke.toml`,1 线程 | `d771891de94d0082f31f496a173f3645c31256c70c3b6a6d29d26b72f837af1b` |
+| `config/00.smoke.toml`,1 线程 | `efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977` |
 | `config/00.smoke.toml`,2 线程 | 同上 |
-| `config/04.intraday.toml` | `68707c00e452fd4606e39c44fefc9cacac64bcfd3f29e4dd9e0e601dc847f629` |
-| `config/05.weekly.toml` | `fee172be94551b25f905713ca399a5798bea43a09360e07a2e6e827de3f937f3` |
+| `config/04.intraday.toml` | `7c680a05ae883f02dd8b8a4428a13afc570c86a4d7f16db2badf5a8210b30f86` |
+| `config/05.weekly.toml` | `7c4c0da1569dea4018d393ef115f5765493e9c9b367148b0c6d2b5efcde9002f` |
 
 S1 日线哈希与 S6 验收一致,说明周期解锁未改变日线语义与成交。
 

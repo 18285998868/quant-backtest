@@ -46,7 +46,7 @@ cargo run --release -- validate --config config/00.smoke.toml  通过
 cargo run --release -- run --config config/00.smoke.toml       退出码 0
 ```
 
-冒烟产物:`target/smoke-s1/result.json`、`target/smoke-s1/report.html`;JSON 可解析,HTML 无外链。二次运行 `result_hash` 一致:`144d1118f69392cf1e2369f8b0375037257d5e9eda9bbe59153f64ccf8ee5714`。
+冒烟产物:`target/smoke-s1/result.json`、`target/smoke-s1/report.html`;JSON 可解析,HTML 无外链。二次运行 `result_hash` 一致:`efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977`。
 
 吞吐基准(2 线程,门槛 1e6):空策略 50,175,123 bar 步/秒,双均线 36,376,679 bar 步/秒。
 

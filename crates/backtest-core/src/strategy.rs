@@ -39,6 +39,12 @@ pub trait Strategy: Send {
         0
     }
 
+    /// 策略按历史下标读取行情时需要的回看长度。分块回放会在块首额外携带
+    /// 这么多根 bar,但不重复喂给策略。默认与 `warmup_bars` 一致。
+    fn history_bars(&self) -> usize {
+        self.warmup_bars()
+    }
+
     /// 取走策略在本根 bar 产生的告警。引擎会追加到结果 `warnings`。
     fn take_warnings(&mut self) -> Vec<String> {
         Vec::new()

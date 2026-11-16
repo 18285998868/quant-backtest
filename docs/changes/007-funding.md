@@ -20,8 +20,9 @@
 4. 归档时间戳:Binance `fundingRate` 的 `calc_time` 偶尔比整点晚 1–2ms,
    装载时向下取整到秒。否则这些结算会被分到下一根 bar,错用下一根收盘价。
 5. 哈希:`config_hash` 不纳入资金费开关;启用资金费时 `data_hash` 追加
-   `quant-backtest/funding/v1` 段。未启用时 `data_hash` 与旧版本一致,
-   保持历史 spot/CSV 结果可复现。
+   `quant-backtest/funding/v1` 段;未启用时 `data_hash` 与旧版本一致。
+   M4 把数据哈希升级为 v2,资金费段同步改为 `funding/v2`,历史哈希按 v2
+   重录,见 [008](./008-chunked-streaming.md)。
 6. 结果与报告:`BacktestResult.funding: Option<FundingSummary>`,
    含 `total_cost`、`paid`、`received`、`events` 与 `by_symbol`;
    未启用时 JSON 省略。HTML 成本章节单列资金费,并渲染按标的明细。
@@ -57,10 +58,10 @@ bar 收盘,属于近似,在报告假设与验收文档中披露。
 - 单标的 BTCUSDT UM 1h 2024-01:744 根 bar,93 次区间内结算,87 次实际扣费,
   净支出 `-34.92654974212712`;独立复算差 `1.8e-13`。
 - 1/2 线程 `result_hash` 同为
-  `695e40efbb014dc3a88f1cc3f2076f73d6341aa93eb50907c2910e875c9e9f38`。
+  `a8d5b41e452fa133c65c02dc4f92ebb09b071222017c5fa06b183a96fdf90438`。
 - 4 标的组合:179 次结算,`by_symbol` 成本与次数之和等于总账;
   1/2 线程哈希一致。
-- `funding = false` 与 spot 冒烟回归通过;spot 结果哈希保持 `d771891d...`。
+- `funding = false` 与 spot 冒烟回归通过;spot 结果哈希保持 `efbb00b9...`。
 - 负向路径覆盖 spot/Dukascopy 误开、资金费乱序/非有限值与区间内无 bar。
 - 完整门禁与干净克隆验收结果见 [M3 验收](../../STEP.d/13-funding.md)。
 

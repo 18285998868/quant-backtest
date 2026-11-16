@@ -2,7 +2,7 @@
 
 纯 Rust 的多周期、多标的、可做空策略回测引擎,支持直接读取 Binance/Dukascopy 归档,参数扫描与 walk-forward。
 
-- 当前阶段:M3 资金费与合约成本
+- 当前阶段:M4 分块流式加载与哈希 v2
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -51,6 +51,13 @@ Binance `futures/um`/`futures/cm` 默认按归档资金费结算,结果与报告
 资金费成本;`spot` 与 Dukascopy 默认关闭。需要关闭期货资金费时设置
 `source.funding = false`;`spot` 或 Dukascopy 设 `funding = true` 会报配置错误。
 
+分钟级大样本可设置 `run.chunk_bars`(正整数)强制按窗口装载,或设置
+`run.memory_limit_gb > 0` 让全量估算超限时自动分块。窗口按绝对下标回放,
+策略历史只读、引擎状态延续;整段与分块的 `data_hash`、`result_hash` 与
+`sweep_hash` 一致。`walkforward` 首版仍整段装载。契约见
+[流程设计 §3.10](./docs/03-流程设计.md),验收见
+[M4 分块流式加载](./STEP.d/14-chunking.md)。
+
 ## 测试与门禁
 
 ```bash
@@ -70,6 +77,7 @@ release 构建;`cargo audit` 需要访问 RustSec 公告库。
 - [M1 多周期验收](./STEP.d/11-m1-acceptance.md)
 - [M2 归档数据源验收](./STEP.d/12-archive-source.md)
 - [M3 资金费验收](./STEP.d/13-funding.md)
+- [M4 分块流式加载验收](./STEP.d/14-chunking.md)
 
 ## 许可
 

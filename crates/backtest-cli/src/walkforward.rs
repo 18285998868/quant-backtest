@@ -35,6 +35,7 @@ pub(crate) fn execute(
 ) -> Result<WalkForwardRun> {
     let started = Instant::now();
     let grid = Grid::build(config)?;
+    let data = sweep::Data::Full(universe);
     let grid_warmup = grid.max_warmup_bars();
     if wf.warmup_bars < grid_warmup {
         return Err(ConfigError::Invalid {
@@ -61,7 +62,7 @@ pub(crate) fn execute(
             window.train_start,
             window.train_end,
         );
-        let mut tasks = sweep::run_grid(&pool, &grid, universe, train_range, wf.objective)?;
+        let mut tasks = sweep::run_grid(&pool, &grid, &data, train_range, wf.objective)?;
         sweep::sort_tasks(&mut tasks);
         let Some(best) = tasks
             .iter()

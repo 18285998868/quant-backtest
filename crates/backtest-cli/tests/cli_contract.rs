@@ -359,3 +359,81 @@ fn result_hash_is_stable_across_threads() {
     assert_eq!(a["meta"]["threads"], 1);
     assert_eq!(b["meta"]["threads"], 2);
 }
+
+#[test]
+fn chunked_run_and_sweep_match_full_load() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = fixture("fixtures/sma_6bars.csv");
+    let base = base_config(&data, &dir.path().join("out"), "TEST");
+    let chunked = base.replace("memory_limit_gb = 0", "memory_limit_gb = 0\nchunk_bars = 2");
+    let read_json = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read json"))
+            .expect("parse json")
+    };
+
+    let full_run = write_config(dir.path(), "run-full.toml", &base);
+    let chunk_run = write_config(dir.path(), "run-chunked.toml", &chunked);
+    let (out_full, out_chunk) = (dir.path().join("run-full"), dir.path().join("run-chunk"));
+    for (config, out) in [(&full_run, &out_full), (&chunk_run, &out_chunk)] {
+        let output = run(&[
+            "run",
+            "--config",
+            config.to_str().expect("config path"),
+            "--threads",
+            "1",
+            "--out",
+            out.to_str().expect("out path"),
+        ]);
+        assert_exit(&output, 0);
+        if config == &chunk_run {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("分块每窗口"));
+        }
+    }
+    let full = read_json(&out_full.join("result.json"));
+    let chunk = read_json(&out_chunk.join("result.json"));
+    assert_eq!(full["result_hash"], chunk["result_hash"]);
+    assert_eq!(full["meta"]["data_hash"], chunk["meta"]["data_hash"]);
+
+    let sweep_data = fixture("fixtures/s5_daily.csv");
+    let sweep_base = base_config(&sweep_data, &dir.path().join("out"), "TEST");
+    let sweep_body = format!(
+        "{sweep_base}\n[sweep]\nobjective = \"sharpe\"\ntop_k = 1\noos_split = 0.7\n\n\
+         [sweep.grid]\nfast = [5]\nslow = [20]\n"
+    );
+    let sweep_chunked = sweep_body.replace(
+        "memory_limit_gb = 0",
+        "memory_limit_gb = 0\nchunk_bars = 50",
+    );
+    let full_sweep = write_config(dir.path(), "sweep-full.toml", &sweep_body);
+    let chunk_sweep = write_config(dir.path(), "sweep-chunked.toml", &sweep_chunked);
+    let (sweep_full_out, sweep_chunk_out) = (
+        dir.path().join("sweep-full"),
+        dir.path().join("sweep-chunk"),
+    );
+    for (config, out) in [
+        (&full_sweep, &sweep_full_out),
+        (&chunk_sweep, &sweep_chunk_out),
+    ] {
+        let output = run(&[
+            "sweep",
+            "--config",
+            config.to_str().expect("config path"),
+            "--threads",
+            "1",
+            "--out",
+            out.to_str().expect("out path"),
+        ]);
+        assert_exit(&output, 0);
+        if config == &chunk_sweep {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("分块每窗口"));
+        }
+    }
+    let full = read_json(&sweep_full_out.join("sweep_summary.json"));
+    let chunk = read_json(&sweep_chunk_out.join("sweep_summary.json"));
+    assert_eq!(full["sweep_hash"], chunk["sweep_hash"]);
+    assert_eq!(full["meta"]["data_hash"], chunk["meta"]["data_hash"]);
+    assert_eq!(
+        full["results"][0]["result_hash"],
+        chunk["results"][0]["result_hash"]
+    );
+}

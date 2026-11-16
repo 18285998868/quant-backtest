@@ -83,9 +83,9 @@ target/release/quant-backtest sweep --config fixtures/sweep.toml --threads 2 --o
   OOS 收益 16.196%,OOS Sharpe 6.7979,OOS 最大回撤 2.8678%。
 - IS/OOS 排名相关 0.9845588。
 - DSR 0.9785087,试验数 16,每期 Sharpe 0.3487264。
-- `sweep_hash` 为 `6edce9d9b7fc6763ae426c43f816ed7dc0a774b62694ef6c094e14619f736fc2`,
+- `sweep_hash` 为 `41d11ac9f979517f45bd137b80ca41ffd16cf50b02081c92387c6b171e61bfab`,
   auto、1、2 线程一致。
-- `result_hash` 为 `4750a59489fd2fd0a159a79fc0932d97b46abedf7a8a03d794ba1a39a31c7e00`,
+- `result_hash` 为 `79b4891ede6e6baeb0b556a8a2d70c2775d7d7353f5cad393333c9a11b1a9053`,
   三组线程一致。
 - 报告 10 章,2 个内联 SVG,无外链、无脚本;参数边际 2 个,热力图 16 格。
 
@@ -105,7 +105,7 @@ target/release/quant-backtest walkforward --config fixtures/walkforward.toml --t
 - OOS 拼接 180 点,首点 100000,末点 133731.9561;总收益 33.732%,CAGR 80.960%,
   Sharpe 7.739821,最大回撤 2.8678%。
 - DSR 0.9943426,试验数 48(16 组 × 3 窗),每期 Sharpe 0.4051207。
-- `result_hash` 为 `0bee99bbe6532ad053710ada945bdd84a2ca8859d5297cee19b3488554975776`,
+- `result_hash` 为 `4f0e7bd642c68cf434f25b2d567f1aeeba3f72909a031b87cd96c19d8e9f05c5`,
   auto、1、2 线程一致。
 - 警告:窗口 0 无预热历史、测试末仍有未成交订单、尾窗超出数据长度被丢弃。
 - 报告 10 章,5 个内联 SVG;headless Chromium 在阻断外部解析时正常渲染。
@@ -127,12 +127,12 @@ target/release/quant-backtest walkforward --config fixtures/walkforward.toml --t
 
 | 配置 | `result_hash` |
 | --- | --- |
-| `config/00.smoke.toml` | `d771891de94d0082f31f496a173f3645c31256c70c3b6a6d29d26b72f837af1b` |
-| `config/01.risk-smoke.toml` | `00c15e27a2e05e4ecaa5e9729c01639d153d7152c1aa59f71485d7b96151d802` |
-| `config/02.portfolio-smoke.toml` | `6375664e77d7f0e03dc85d51a7879d3462701fcef9aaf478c0b0fa77817995e0` |
+| `config/00.smoke.toml` | `efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977` |
+| `config/01.risk-smoke.toml` | `cd330ad9d98802e9d3492a61da4d24fcf5b17f1e51cba8b718d8a72e7a25979e` |
+| `config/02.portfolio-smoke.toml` | `d84b79855eae8f066b0ec6024673f8df4cffed2b7029ff9c119c84bb3ba8b1be` |
 
 S4 回归:`config/03.sweep.toml` 为 27 组、18 有效、9 非法跳过,
-`sweep_hash=e3bb4e53b7ec362e07a207ed7a55f00a13d82b33ece9ee124f13a68d33bc8c23`。
+`sweep_hash=9fe1c058bc62427818af5a011f6a6c51bf3f10eb0b35f5e9220bf038fcb1eec`。
 
 ## 未运行项与限制
 

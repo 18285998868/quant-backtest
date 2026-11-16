@@ -46,26 +46,31 @@
 - M3:Binance `futures/um`/`futures/cm` 默认按归档 `fundingRate` 结算资金费;`spot`/Dukascopy 默认关闭,`source.funding` 可显式覆盖,现货误开在配置阶段报错。
 - M3:稀疏 `FundingSeries`;结算窗口 `(上一根 bar 收盘, 本根 bar 收盘]`,本根收盘价计名义价值,正费率多头支付;归档 `calc_time` 的亚秒偏移归一为整秒。
 - M3:`BacktestResult.funding`(未启用时 JSON 省略)、报告 schema 1.2、HTML 资金费成本与按标的明细、walk-forward 跨窗口合并。
-- M3:启用资金费时 `data_hash` 追加 `quant-backtest/funding/v1` 段;未启用时 spot/CSV 哈希不变,`config_hash` 不纳入开关。
+- M3:启用资金费时 `data_hash` 追加 `quant-backtest/funding/v1` 段;未启用时 spot/CSV 哈希不变,`config_hash` 不纳入开关;M4 把资金费段升级为 v2,见下。
 - M3:新增 `STEP.d/13-funding.md` 与 `docs/changes/007-funding.md`。
+- M4:`run.chunk_bars` 显式分块;`memory_limit_gb > 0` 且全量估算超限时自动分块;`run`/`validate`/`sweep` 接入,`walkforward` 保持整段。
+- M4:窗口按绝对下标连续推进,块首携带只读策略历史;`EngineState` 携带现金、持仓、挂单、目标权重、权益、成交、交易、告警、资金费光标与下一根下标。
+- M4:数据哈希升级为 v2 固定页 `PAGE_BARS = 65_536`,支持时间分块汇总;资金费段同步升为 `quant-backtest/funding/v2`。
+- M4:CSV/归档读取新增 `DataPlan`、`plan_universe_reporting()` 与 `load_window()`;CLI 输出全量与单窗口内存估算。
+- M4:新增 `crates/backtest-data/src/hash.rs`、`crates/backtest-cli/src/stream.rs`、`STEP.d/14-chunking.md` 与 `docs/changes/008-chunked-streaming.md`。
 
 ### 验收
 
 - 2026-11-16:60 个测试、fmt、clippy、doc、deny、audit 与 release 冒烟全部通过。
 - 缺失 bar 由数据加载加引擎集成测试覆盖;零成交量 bar 由引擎单测覆盖。
 - S1 冒烟二次运行 `result_hash` 一致;2 线程空策略吞吐 50,175,123 bar 步/秒。
-- S2 风险冒烟 `result_hash` 为 `8476c2288d3f99a60c9b0ce53f09427e8ac25cb8f3e521194eb15ede8bc4d571`,止损退出 1 笔。
+- S2 风险冒烟 `result_hash` 为 `cd330ad9d98802e9d3492a61da4d24fcf5b17f1e51cba8b718d8a72e7a25979e`,止损退出 1 笔。
 - 2026-11-16:S3 验收,82 个测试、fmt、clippy、doc、deny/audit(离线)与 release 冒烟全部通过。
-- S3 组合冒烟 2 个标的、4 笔交易、10 笔成交、0 条告警;二次运行 `result_hash` 一致:`8796ce7f400ccbd6a30592c2a98bfba0258b53f609e108a07767fc7a17e2a411`。
-- S1/S2 回归哈希保持不变:`144d1118...`、`8476c228...`。
+- S3 组合冒烟 2 个标的、4 笔交易、10 笔成交、0 条告警;二次运行 `result_hash` 一致:`d84b79855eae8f066b0ec6024673f8df4cffed2b7029ff9c119c84bb3ba8b1be`。
+- S1/S2 回归哈希保持不变:`efbb00b9...`、`cd330ad9...`。
 - 2026-11-16:S4 验收,92 个测试、fmt、clippy、doc、deny/audit(离线)与 release 冒烟全部通过。
-- S4 扫描冒烟 27 组、18 有效、9 组非法跳过,`sweep_hash` 为 `3e92bf60...`,auto/1/2 线程一致。
-- S1/S2/S3 回归哈希保持不变:`144d1118...`、`8476c228...`、`8796ce7f...`。
+- S4 扫描冒烟 27 组、18 有效、9 组非法跳过,`sweep_hash` 为 `9fe1c058...`,auto/1/2 线程一致。
+- S1/S2/S3 回归哈希保持不变:`efbb00b9...`、`cd330ad9...`、`d84b7985...`。
 - 2026-11-16:S6 验收,130 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit 与 release build 全部通过。
 - 10 个非法数据夹具退出码 3,非法配置与 CLI 覆盖退出码 2,均含字段上下文且无 panic。
-- S1 冒烟 1/2 线程 `result_hash` 同为 `d771891d...`;S2/S3 回归哈希保持不变。
+- S1 冒烟 1/2 线程 `result_hash` 同为 `efbb00b9...`;S2/S3 回归哈希保持不变。
 - 干净克隆的测试、release 构建与 validate/run/portfolio/sweep/walkforward 全部成功;
-  sweep 与 walkforward 哈希分别为 `6edce9d9...`、`0bee99bb...`,与 S5 记录一致。
+  sweep 与 walkforward 哈希分别为 `41d11ac9...`、`4f0e7bd6...`,与 S5 记录一致。
 - 密钥与个人绝对路径扫描无命中;`cargo audit` 扫描 101 个依赖无漏洞报告。
 - 2026-11-16:M2 验收,151 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit 与 release 构建全部通过。
 - Binance BTCUSDT 1h 归档与等价 CSV 的 `data_hash`、`result_hash` 完全一致;
@@ -75,15 +80,29 @@
   `cargo test --workspace --locked` 与 `cargo build --release --locked`。
 - 2026-11-16:M3 验收,159 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release 构建与 `scripts/check.sh --ci` 全部通过。
 - BTCUSDT UM 1h 2024-01:744 根 bar、93 次区间内结算、87 次扣费,
-  净支出 `-34.92654974212712`;独立复算差 `1.8e-13`,1/2 线程 `result_hash` 同为 `695e40ef...`。
+  净支出 `-34.92654974212712`;独立复算差 `1.8e-13`,1/2 线程 `result_hash` 同为 `a8d5b41e...`。
 - 4 标的组合 179 次结算,`by_symbol` 成本与次数之和等于总账,
-  1/2 线程 `result_hash` 同为 `766b917f...`。
-- `funding = false` 结果无资金费字段且 `config_hash` 不变;spot 冒烟保持 `d771891d...`。
+  1/2 线程 `result_hash` 同为 `54259a53...`。
+- `funding = false` 结果无资金费字段且 `config_hash` 不变;spot 冒烟保持 `efbb00b9...`。
 - 提交 `558be63` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(159 个)与 `cargo build --release --locked`;
   `fund_1h` 与 spot 冒烟哈希与工作副本一致。
 - 2026-11-16:M1 验收,138 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release build 与 `scripts/check.sh --ci` 全部通过。
-- 1h 冒烟 `result_hash` 为 `68707c00...`,年化因子 8760,2 笔交易;1w 冒烟 `result_hash` 为 `fee172be...`,年化因子 52。
-- 1h 扫描 `sweep_hash` 为 `359ad35d...`(4 组/3 有效/1 跳过),walk-forward `result_hash` 为 `ca243a95...`(2 窗口/2 跳过)。
-- S1 日线冒烟 1/2 线程 `result_hash` 保持 `d771891d...`,周期解锁未改变日线语义。
+- 1h 冒烟 `result_hash` 为 `7c680a05...`,年化因子 8760,2 笔交易;1w 冒烟 `result_hash` 为 `7c4c0da1...`,年化因子 52。
+- 1h 扫描 `sweep_hash` 为 `93ea6a6d...`(4 组/3 有效/1 跳过),walk-forward `result_hash` 为 `0a6e9982...`(2 窗口/2 跳过)。
+- S1 日线冒烟 1/2 线程 `result_hash` 保持 `efbb00b9...`,周期解锁未改变日线语义。
 - 干净克隆测试 138 个通过、release 构建成功;1h/1w 示例哈希与工作副本一致。
+- 2026-11-16:M4 验收,172 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release 构建与 `scripts/check.sh --ci` 全部通过。
+- BTCUSDT UM 1m 2023-06(43199 bar,`chunk_bars=5000`):整段与分块
+  `data_hash` 同为 `d9dc81d8...`、`result_hash` 同为 `f648cd3e...`,2338 笔交易、89 次结算、0 条告警。
+- BTC/ETH/BNB/SOL UM 1h 2024-01(744 bar,`chunk_bars=100`):整段与分块
+  `data_hash` 同为 `da7521b2...`、`result_hash` 同为 `54259a53...`,198 笔交易、179 次结算、24 条告警。
+- `fixtures/sweep.toml` 16 组网格整段与分块 `sweep_hash` 同为 `41d11ac9...`;
+  CLI 契约测试覆盖 run 与 sweep 的全量/分块一致性。
+- Binance 1h 与等价 CSV 的 v2 哈希一致:`data_hash = b527ca0a...`、
+  `result_hash = c64051ce...`。
+- 历史哈希重录后,`config_hash` 不变;S1/S2/S3/S4/S5/1h/1w 分别为
+  `efbb00b9...`、`cd330ad9...`、`d84b7985...`、`9fe1c058...`、
+  `41d11ac9...`/`4f0e7bd6...`、`7c680a05...`、`7c4c0da1...`。
+- 43k bar 样本的进程峰值 RSS 由二进制基线主导(单次约 64 MB 与 69–75 MB),
+  数据内存估算分别为 2.0 MiB 与每窗口 195.3 KiB;超大样本内存收益待目标机实测。

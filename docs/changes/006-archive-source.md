@@ -48,9 +48,9 @@ Binance/Dukascopy 归档,不再强制先导出 CSV。此前的加载器只接受
 - 151 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit
   与 release 构建全部通过。
 - Binance BTCUSDT 1h(2024-01)与等价 CSV:`data_hash` 同为
-  `d79c170636eb695209f98bccb514dff1b656daa38cab81ec089b991f2a45bc0e`,
+  `b527ca0a7b3ff8a20510d92a55d1fc8af6c268f8d4cbbfa628020fef51885ffd`,
   `result_hash` 同为
-  `5787aa022674755b747c444c282d88a95a641cbaace0fbf94146bbe0482453f5`。
+  `c64051cebda7292b225defc3f45aaf240dd1489c75ac25b963f03af206db0bb8`。
 - Binance 1m(2023-06)43200 根 bar;4 标的 1h 组合 744 根 bar。
 - Dukascopy EURUSD H1(2023-07)743 根 bar;缺失的上月归档文件进入诊断,
   不静默补齐。

@@ -22,8 +22,9 @@
 4. 现金变化为 `-qty × close × multiplier × rate`:正费率多头支付、空头收取,
    空头负 qty 自动反号。名义价值用本根收盘价。
 5. 归档 `calc_time` 的 1–2ms 偏移向下取整到秒,避免被分到下一根 bar。
-6. 启用资金费时 `data_hash` 追加 `quant-backtest/funding/v1` 段;
-   未启用时哈希不变。`config_hash` 不纳入资金费开关。
+6. 启用资金费时 `data_hash` 追加 `quant-backtest/funding/v2` 段;
+   未启用时不追加。`config_hash` 不纳入资金费开关。M4 将原 v1 段升级为
+   v2,结算语义未变,历史哈希随数据哈希 v2 一并重录。
 
 1h 及更短周期与逐次结算等价。日线及更长周期把窗口内多次结算合并到
 bar 收盘,属于近似,见文末限制。
@@ -75,8 +76,8 @@ slippage 2 bps,`sma_cross(6, 24)`,允许做空,`threads = 1`。
 | 付出 | `379.6266249664753` |
 | 收到 | `414.5531747086024` |
 | `config_hash` | `d96b74b5f665141900ff40953d6396d39e90367963583ab744b297a92fe0a2fd` |
-| `data_hash` | `14c085bfbbc47255faeeaed0b3d9d1d606c208bd2f3f07095aa550f7a5977d05` |
-| `result_hash` | `695e40efbb014dc3a88f1cc3f2076f73d6341aa93eb50907c2910e875c9e9f38` |
+| `data_hash` | `499b577cd620d60446bbfcd0f71e3bb1e6d319d3992f689e22e88fc09e1db2e6` |
+| `result_hash` | `a8d5b41e452fa133c65c02dc4f92ebb09b071222017c5fa06b183a96fdf90438` |
 
 其中 15 条 `calc_time` 带 1–2ms 偏移,装载时归一为整点。
 
@@ -108,8 +109,8 @@ funding CSV 重放:
 
 | 运行 | `threads` | `result_hash` |
 | --- | --- | --- |
-| 第 1 次 | 1 | `695e40ef...` |
-| 第 2 次 | 2 | `695e40ef...` |
+| 第 1 次 | 1 | `a8d5b41e...` |
+| 第 2 次 | 2 | `a8d5b41e...` |
 
 两次 `meta.threads` 分别为 1 与 2,资金费汇总、指标与逐笔交易一致。
 
@@ -120,17 +121,18 @@ funding CSV 重放:
 | 字段 | 启用 | 关闭 |
 | --- | --- | --- |
 | `config_hash` | `d96b74b5...` | `d96b74b5...` |
-| `data_hash` | `14c085bf...` | `026bdf87...` |
-| `result_hash` | `695e40ef...` | `bbcc37609...` |
+| `data_hash` | `499b577c...` | `b61b24e5...` |
+| `result_hash` | `a8d5b41e...` | `96c7425b...` |
 | 总收益 | `-10.3308%` | `-10.3603%` |
 | 资金费字段 | 有 | 无(JSON 省略) |
 
 spot 冒烟 `config/00.smoke.toml` 在 M3 前后均为
-`result_hash = d771891de94d0082f31f496a173f3645c31256c70c3b6a6d29d26b72f837af1b`,
+`result_hash = efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977`,
 说明现货路径未受影响。
 
 历史说明:`144d1118...` 是 S1–S4 的 spot 基线;S5 新增 `cost_drag` 指标后
 按 [S5 验收](./09-s5-acceptance.md) 变为 `d771891d...`,与 M3 无关。
+M4 的 v2 哈希重录后当前值为 `efbb00b9...`。
 
 ## 多标的真实数据
 
@@ -150,8 +152,8 @@ inverse_vol, gross=0.95)`,`threads = 1/2`。
 - `sum(by_symbol.events) = 179 = events`;
 - `paid - received = 3822.766141709807 = total_cost`;
 - 1/2 线程 `result_hash` 同为
-  `766b917f28c190cc6f8a68b8d1768360e91bea7a6b1a863722d1b83a2a57a911`;
-- `data_hash = 15ee446e3136caff34f7f128785ba38b70ffb5dda9286985686e320320c8c8bb`。
+  `54259a53f3eb610ba442ff721ee489bed09187fcf263322edd509a769058d286`;
+- `data_hash = da7521b26452e214f431cdb90c619ba4efa2a8e36804bc07e16d5caa49d0a262`。
 
 该配置仍有 24 条保证金/现金裁剪告警,属于执行约束,不影响资金费总账与
 `by_symbol` 的对账关系。
@@ -204,10 +206,10 @@ inverse_vol, gross=0.95)`,`threads = 1/2`。
 
 | 配置 | 线程 | `result_hash` |
 | --- | --- | --- |
-| `fund_1h` | 1/2 | `695e40ef...` |
-| `fund_multi` | 1/2 | `766b917f...` |
-| `nofund_1h` | 1 | `bbcc3760...` |
-| `config/00.smoke.toml` | auto | `d771891d...` |
+| `fund_1h` | 1/2 | `a8d5b41e...` |
+| `fund_multi` | 1/2 | `54259a53...` |
+| `nofund_1h` | 1 | `96c7425b...` |
+| `config/00.smoke.toml` | auto | `efbb00b9...` |
 
 ## 干净克隆
 
@@ -217,9 +219,9 @@ inverse_vol, gross=0.95)`,`threads = 1/2`。
 - `cargo build --release --locked`:成功;
 - path 依赖 `../../../data-reader/crates/binance-core` 与锁文件在全新工作区
   可解析;
-- `fund_1h` 克隆运行 `result_hash=695e40ef...`,资金费净支出
+- `fund_1h` 克隆运行 `result_hash=a8d5b41e...`,资金费净支出
   `-34.92654974212712`、87 次,与工作副本一致;
-- `config/00.smoke.toml` 克隆运行 `result_hash=d771891d...`,未产生资金费字段。
+- `config/00.smoke.toml` 克隆运行 `result_hash=efbb00b9...`,未产生资金费字段。
 
 ## 相关文档
 

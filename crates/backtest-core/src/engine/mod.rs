@@ -105,6 +105,90 @@ struct Engine<'a> {
     funding_events: usize,
     funding_by_symbol: Vec<f64>,
     funding_events_by_symbol: Vec<usize>,
+    next_index: usize,
+}
+
+/// 跨窗口携带的引擎状态。分块回放时每块重建 `Engine`,只移动这份状态。
+struct EngineState {
+    cash: f64,
+    positions: Vec<Position>,
+    pending: Vec<Option<PendingOrder>>,
+    target_weights: Vec<f64>,
+    equity: Vec<EquityPoint>,
+    fills: Vec<FillRecord>,
+    trades: Vec<TradeRecord>,
+    warnings: Vec<String>,
+    peak: f64,
+    targets: Vec<TargetPosition>,
+    updates: Vec<Option<f64>>,
+    position_views: Vec<PositionView>,
+    risk_locked: Vec<bool>,
+    funding_cursor: Vec<usize>,
+    funding_paid: f64,
+    funding_received: f64,
+    funding_events: usize,
+    funding_by_symbol: Vec<f64>,
+    funding_events_by_symbol: Vec<usize>,
+    next_index: usize,
+}
+
+impl EngineState {
+    fn new(symbols: usize, input: &EngineInput) -> Self {
+        Self {
+            cash: input.initial_cash,
+            positions: (0..symbols).map(|_| Position::default()).collect(),
+            pending: (0..symbols).map(|_| None).collect(),
+            target_weights: vec![0.0; symbols],
+            equity: Vec::new(),
+            fills: Vec::new(),
+            trades: Vec::new(),
+            warnings: Vec::new(),
+            peak: input.initial_cash,
+            targets: Vec::with_capacity(symbols),
+            updates: vec![None; symbols],
+            position_views: (0..symbols)
+                .map(|symbol| PositionView {
+                    symbol: symbol as u32,
+                    qty: 0.0,
+                    avg_entry: 0.0,
+                    mark: 0.0,
+                    stop: None,
+                    take_profit: None,
+                })
+                .collect(),
+            risk_locked: vec![false; symbols],
+            funding_cursor: vec![0; symbols],
+            funding_paid: 0.0,
+            funding_received: 0.0,
+            funding_events: 0,
+            funding_by_symbol: vec![0.0; symbols],
+            funding_events_by_symbol: vec![0; symbols],
+            next_index: input.start_index,
+        }
+    }
+}
+
+/// 校验一次完整运行的下标范围。分块回放只在首块做一次。
+fn validate_range(total: usize, input: &EngineInput) -> Result<usize> {
+    let end_index = input.end_index.min(total);
+    if input.start_index >= end_index {
+        return Err(ConfigError::Invalid {
+            field: "range.start_index".into(),
+            message: format!("必须在 [0, {end_index}) 内,实际 {}", input.start_index),
+        }
+        .into());
+    }
+    if input.trade_start_index < input.start_index || input.trade_start_index >= end_index {
+        return Err(ConfigError::Invalid {
+            field: "range.trade_start_index".into(),
+            message: format!(
+                "必须在 [{}, {end_index}) 内,实际 {}",
+                input.start_index, input.trade_start_index
+            ),
+        }
+        .into());
+    }
+    Ok(end_index)
 }
 
 pub fn run_backtest(
@@ -120,76 +204,185 @@ pub fn run_backtest(
         .into());
     }
     let total = universe.len();
-    let end_index = input.end_index.min(total);
-    if input.start_index >= end_index {
+    let end_index = validate_range(total, input)?;
+    if input.start_index < universe.window_start() || end_index > universe.window_end() {
         return Err(ConfigError::Invalid {
-            field: "range.start_index".into(),
-            message: format!("必须在 [0, {end_index}) 内,实际 {}", input.start_index),
-        }
-        .into());
-    }
-    if end_index <= input.start_index {
-        return Err(ConfigError::Invalid {
-            field: "range.end_index".into(),
+            field: "data".into(),
             message: format!(
-                "必须大于 start_index {},实际 {}",
-                input.start_index, input.end_index
+                "数据窗口 [{}, {}) 未覆盖请求范围 [{}, {})",
+                universe.window_start(),
+                universe.window_end(),
+                input.start_index,
+                end_index
             ),
         }
         .into());
     }
-    if input.trade_start_index < input.start_index || input.trade_start_index >= end_index {
-        return Err(ConfigError::Invalid {
-            field: "range.trade_start_index".into(),
-            message: format!(
-                "必须在 [{}, {end_index}) 内,实际 {}",
-                input.start_index, input.trade_start_index
-            ),
-        }
-        .into());
-    }
-    let n = universe.symbol_count();
-    let mut engine = Engine {
+    let mut engine = Engine::from_state(
         universe,
         input,
-        cash: input.initial_cash,
-        positions: (0..n).map(|_| Position::default()).collect(),
-        pending: (0..n).map(|_| None).collect(),
-        target_weights: vec![0.0; n],
-        start_index: input.start_index,
-        trade_start_index: input.trade_start_index,
-        end_index,
-        equity: Vec::with_capacity(end_index - input.trade_start_index),
-        fills: Vec::new(),
-        trades: Vec::new(),
-        warnings: Vec::new(),
-        peak: input.initial_cash,
-        targets: Vec::with_capacity(n),
-        updates: vec![None; n],
-        position_views: (0..n)
-            .map(|symbol| PositionView {
-                symbol: symbol as u32,
-                qty: 0.0,
-                avg_entry: 0.0,
-                mark: 0.0,
-                stop: None,
-                take_profit: None,
-            })
-            .collect(),
-        risk_locked: vec![false; n],
-        funding_cursor: vec![0; n],
-        funding_paid: 0.0,
-        funding_received: 0.0,
-        funding_events: 0,
-        funding_by_symbol: vec![0.0; n],
-        funding_events_by_symbol: vec![0; n],
-    };
-    engine.run(strategy)
+        EngineState::new(universe.symbol_count(), input),
+    );
+    engine.advance(strategy)?;
+    engine.finish()
+}
+
+/// 逐窗口回放。`next_window` 返回的窗口按绝对下标递增,窗口之间不能留空洞;
+/// 每块可以向前多带若干根历史 bar 供策略读取,但不会重复喂给策略。
+pub fn run_backtest_stream<F>(
+    input: &EngineInput,
+    strategy: &mut dyn Strategy,
+    mut next_window: F,
+) -> Result<BacktestResult>
+where
+    F: FnMut() -> Result<Option<Universe>>,
+{
+    let mut state: Option<EngineState> = None;
+    let mut last: Option<Universe> = None;
+    let mut symbols = 0usize;
+    let mut total = 0usize;
+    while let Some(window) = next_window()? {
+        if state.is_none() {
+            symbols = window.symbol_count();
+            total = window.len();
+            let end = validate_range(total, input)?;
+            if input.start_index < window.window_start() || input.start_index >= window.window_end()
+            {
+                return Err(ConfigError::Invalid {
+                    field: "data".into(),
+                    message: format!(
+                        "首个数据窗口 [{}, {}) 未覆盖起点 {}",
+                        window.window_start(),
+                        window.window_end(),
+                        input.start_index
+                    ),
+                }
+                .into());
+            }
+            if end > total {
+                return Err(ConfigError::Invalid {
+                    field: "range.end_index".into(),
+                    message: format!("不能超过数据总长度 {total},实际 {end}"),
+                }
+                .into());
+            }
+            state = Some(EngineState::new(symbols, input));
+        }
+        if window.symbol_count() != symbols || window.len() != total {
+            return Err(ConfigError::Invalid {
+                field: "data".into(),
+                message: "分块窗口的标的数或时间线不一致".into(),
+            }
+            .into());
+        }
+        let current = state.take().ok_or_else(|| ConfigError::Invalid {
+            field: "data".into(),
+            message: "分块状态缺失".into(),
+        })?;
+        let mut engine = Engine::from_state(&window, input, current);
+        engine.advance(strategy)?;
+        state = Some(engine.into_state());
+        last = Some(window);
+    }
+    let window = last.ok_or_else(|| ConfigError::Invalid {
+        field: "data".into(),
+        message: "没有可回测的 bar".into(),
+    })?;
+    let state = state.ok_or_else(|| ConfigError::Invalid {
+        field: "data".into(),
+        message: "分块状态缺失".into(),
+    })?;
+    let engine = Engine::from_state(&window, input, state);
+    let expected = input.end_index.min(window.len());
+    if engine.next_index != expected {
+        return Err(ConfigError::Invalid {
+            field: "data".into(),
+            message: format!("分块窗口只覆盖到 {},请求到 {expected}", engine.next_index),
+        }
+        .into());
+    }
+    engine.finish()
 }
 
 impl Engine<'_> {
-    fn run(&mut self, strategy: &mut dyn Strategy) -> Result<BacktestResult> {
-        for index in self.start_index..self.end_index {
+    fn from_state<'a>(
+        universe: &'a Universe,
+        input: &'a EngineInput,
+        state: EngineState,
+    ) -> Engine<'a> {
+        Engine {
+            universe,
+            input,
+            cash: state.cash,
+            positions: state.positions,
+            pending: state.pending,
+            target_weights: state.target_weights,
+            start_index: input.start_index,
+            trade_start_index: input.trade_start_index,
+            end_index: input.end_index.min(universe.len()),
+            equity: state.equity,
+            fills: state.fills,
+            trades: state.trades,
+            warnings: state.warnings,
+            peak: state.peak,
+            targets: state.targets,
+            updates: state.updates,
+            position_views: state.position_views,
+            risk_locked: state.risk_locked,
+            funding_cursor: state.funding_cursor,
+            funding_paid: state.funding_paid,
+            funding_received: state.funding_received,
+            funding_events: state.funding_events,
+            funding_by_symbol: state.funding_by_symbol,
+            funding_events_by_symbol: state.funding_events_by_symbol,
+            next_index: state.next_index,
+        }
+    }
+
+    fn into_state(self) -> EngineState {
+        EngineState {
+            cash: self.cash,
+            positions: self.positions,
+            pending: self.pending,
+            target_weights: self.target_weights,
+            equity: self.equity,
+            fills: self.fills,
+            trades: self.trades,
+            warnings: self.warnings,
+            peak: self.peak,
+            targets: self.targets,
+            updates: self.updates,
+            position_views: self.position_views,
+            risk_locked: self.risk_locked,
+            funding_cursor: self.funding_cursor,
+            funding_paid: self.funding_paid,
+            funding_received: self.funding_received,
+            funding_events: self.funding_events,
+            funding_by_symbol: self.funding_by_symbol,
+            funding_events_by_symbol: self.funding_events_by_symbol,
+            next_index: self.next_index,
+        }
+    }
+
+    fn advance(&mut self, strategy: &mut dyn Strategy) -> Result<()> {
+        let window_start = self.universe.window_start();
+        let window_end = self.universe.window_end();
+        if self.next_index < window_start {
+            return Err(ConfigError::Invalid {
+                field: "data".into(),
+                message: format!(
+                    "数据窗口从 {window_start} 开始,缺少 [{}, {window_start})",
+                    self.next_index
+                ),
+            }
+            .into());
+        }
+        if self.next_index >= self.end_index || window_end <= self.next_index {
+            return Ok(());
+        }
+        let start = self.next_index.max(window_start);
+        let end = self.end_index.min(window_end);
+        for index in start..end {
             let trading = index >= self.trade_start_index;
             let ts = self.universe.timeline[index];
             self.begin_bar();
@@ -200,6 +393,11 @@ impl Engine<'_> {
             self.queue_close_risk(index);
             self.run_strategy(index, ts, strategy, trading)?;
         }
+        self.next_index = end;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<BacktestResult> {
         for (symbol, order) in self.pending.iter().enumerate() {
             if let Some(order) = order {
                 let what = match order.kind {
@@ -918,7 +1116,7 @@ impl Engine<'_> {
             if qty == 0.0 {
                 continue;
             }
-            let close = universe.series[symbol].close[index];
+            let close = universe.bar(symbol as u32, index).close;
             let payment = qty * close * universe.specs[symbol].multiplier * rate;
             self.cash -= payment;
             if payment > 0.0 {
@@ -1364,6 +1562,7 @@ mod tests {
             funding: Vec::new(),
             timeline: ts,
             data_hash: "test".into(),
+            base_index: 0,
         }
     }
 
@@ -1403,11 +1602,38 @@ mod tests {
             funding: Vec::new(),
             timeline: ts,
             data_hash: "test".into(),
+            base_index: 0,
         }
     }
 
     fn flat_bars(price: f64, len: usize) -> Vec<(f64, f64, f64, f64, f64)> {
         vec![(price, price + 1.0, price - 1.0, price, 1_000_000.0); len]
+    }
+
+    fn window_of(universe: &Universe, start: usize, end: usize, history: usize) -> Universe {
+        let window_start = start.saturating_sub(history);
+        let series = universe
+            .series
+            .iter()
+            .map(|item| BarSeries {
+                symbol: item.symbol,
+                ts: item.ts[window_start..end].to_vec(),
+                open: item.open[window_start..end].to_vec(),
+                high: item.high[window_start..end].to_vec(),
+                low: item.low[window_start..end].to_vec(),
+                close: item.close[window_start..end].to_vec(),
+                volume: item.volume[window_start..end].to_vec(),
+            })
+            .collect();
+        Universe {
+            timeframe: universe.timeframe,
+            specs: universe.specs.clone(),
+            series,
+            funding: universe.funding.clone(),
+            timeline: universe.timeline.clone(),
+            data_hash: universe.data_hash.clone(),
+            base_index: window_start,
+        }
     }
 
     fn universe(opens: &[f64], closes: &[f64]) -> Universe {
@@ -2201,9 +2427,129 @@ mod tests {
             funding: Vec::new(),
             timeline: Vec::new(),
             data_hash: "test".into(),
+            base_index: 0,
         };
         let mut strategy = Scripted::new(&[]);
         let error = run_backtest(&universe, &input(), &mut strategy).expect_err("must fail");
+        assert!(matches!(error, Error::Config(_)));
+    }
+
+    fn assert_same_result(full: &BacktestResult, streamed: &BacktestResult) {
+        let value = |item: &BacktestResult| {
+            serde_json::json!({
+                "equity": item.equity,
+                "fills": item.fills,
+                "trades": item.trades,
+                "metrics": item.metrics,
+                "drawdowns": item.drawdowns,
+                "monthly": item.monthly,
+                "funding": item.funding,
+                "warnings": item.warnings,
+            })
+        };
+        assert_eq!(value(full), value(streamed));
+        assert_eq!(full.meta.first_bar_ts, streamed.meta.first_bar_ts);
+        assert_eq!(full.meta.last_bar_ts, streamed.meta.last_bar_ts);
+        assert_eq!(full.meta.data_hash, streamed.meta.data_hash);
+        assert_eq!(full.meta.config_hash, streamed.meta.config_hash);
+        assert_eq!(full.meta.params, streamed.meta.params);
+        assert_eq!(full.meta.timeframe, streamed.meta.timeframe);
+    }
+
+    #[test]
+    fn streaming_windows_match_full_run() {
+        let closes = [
+            100.0, 102.0, 104.0, 103.0, 101.0, 99.0, 98.0, 100.0, 103.0, 105.0, 104.0, 102.0,
+        ];
+        let mut opens = vec![100.0];
+        opens.extend_from_slice(&closes[..closes.len() - 1]);
+        let universe =
+            universe_with_funding(&opens, &closes, &[(2, 0.001), (5, 0.002), (8, 0.001)]);
+        let plan = [(1, 0.9), (5, 0.0), (7, -0.6), (10, 0.0)];
+
+        let mut full_strategy = Scripted::new(&plan);
+        let full = run_backtest(&universe, &input(), &mut full_strategy).expect("full");
+
+        let chunks = [(0usize, 4usize), (4, 9), (9, closes.len())];
+        let mut next = 0usize;
+        let mut stream_strategy = Scripted::new(&plan);
+        let streamed = run_backtest_stream(&input(), &mut stream_strategy, || {
+            if next >= chunks.len() {
+                return Ok(None);
+            }
+            let (start, end) = chunks[next];
+            next += 1;
+            Ok(Some(window_of(&universe, start, end, 2)))
+        })
+        .expect("stream");
+
+        assert!(!full.trades.is_empty());
+        assert!(full.funding.is_some());
+        assert_same_result(&full, &streamed);
+    }
+
+    #[test]
+    fn streaming_with_warmup_start_matches_full_run() {
+        let universe = universe(&[100.0; 40], &[100.0; 40]);
+        let plan = [(25, 0.5), (32, -0.4), (38, 0.0)];
+        let mut full_input = input();
+        full_input.start_index = 20;
+        full_input.trade_start_index = 30;
+        full_input.end_index = 40;
+        let mut full_strategy = Scripted::new(&plan);
+        let full = run_backtest(&universe, &full_input, &mut full_strategy).expect("full");
+
+        let chunks = [(20usize, 27usize), (27, 34), (34, 40)];
+        let mut next = 0usize;
+        let mut stream_strategy = Scripted::new(&plan);
+        let streamed = run_backtest_stream(&full_input, &mut stream_strategy, || {
+            if next >= chunks.len() {
+                return Ok(None);
+            }
+            let (start, end) = chunks[next];
+            next += 1;
+            Ok(Some(window_of(&universe, start, end, 5)))
+        })
+        .expect("stream");
+
+        assert_eq!(full.equity.len(), 10);
+        assert_eq!(full.fills.len(), 2);
+        assert_same_result(&full, &streamed);
+    }
+
+    #[test]
+    fn stream_rejects_first_window_after_start_index() {
+        let universe = universe(&[100.0; 12], &[100.0; 12]);
+        let mut next = 0usize;
+        let chunks = [(2usize, 6usize), (6, 12)];
+        let mut strategy = Scripted::new(&[]);
+        let error = run_backtest_stream(&input(), &mut strategy, || {
+            if next >= chunks.len() {
+                return Ok(None);
+            }
+            let (start, end) = chunks[next];
+            next += 1;
+            Ok(Some(window_of(&universe, start, end, 0)))
+        })
+        .expect_err("首个窗口未覆盖起点");
+        assert!(matches!(error, Error::Config(_)));
+    }
+
+    #[test]
+    fn stream_rejects_gap_between_windows() {
+        let universe = universe(&[100.0; 12], &[100.0; 12]);
+        let mut next = 0usize;
+        let chunks = [(0usize, 4usize), (5, 12)];
+        let mut strategy = Scripted::new(&[]);
+        let error = run_backtest_stream(&input(), &mut strategy, || {
+            if next >= chunks.len() {
+                return Ok(None);
+            }
+            let (start, end) = chunks[next];
+            next += 1;
+            Ok(Some(window_of(&universe, start, end, 0)))
+        })
+        .expect_err("窗口之间留空洞");
         assert!(matches!(error, Error::Config(_)));
     }
 }

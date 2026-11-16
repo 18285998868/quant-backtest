@@ -13,6 +13,7 @@ use backtest_core::model::{
     MonthlyReturn, TradeRecord, Universe,
 };
 use backtest_core::system::{ResolvedWorkers, peak_rss_bytes};
+use backtest_data::DataPlan;
 use backtest_report::{
     HeatmapCell, MarginalPoint, OosReport, ParamMarginal, SweepCounts as ReportCounts,
     SweepHeatmap, SweepReport, SweepRow,
@@ -151,6 +152,31 @@ struct Combo {
     config: RunConfig,
 }
 
+/// 扫描使用的数据集:整段驻留或按窗口流式装载。
+pub(crate) enum Data<'a> {
+    Full(&'a Universe),
+    Stream {
+        plan: &'a DataPlan,
+        chunk_bars: usize,
+    },
+}
+
+impl Data<'_> {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Full(universe) => universe.len(),
+            Self::Stream { plan, .. } => plan.len(),
+        }
+    }
+
+    pub fn data_hash(&self) -> &str {
+        match self {
+            Self::Full(universe) => &universe.data_hash,
+            Self::Stream { plan, .. } => &plan.data_hash,
+        }
+    }
+}
+
 /// 已校验、已展开的网格。构造一次,可复用到多个窗口。
 pub(crate) struct Grid {
     combos: Vec<Combo>,
@@ -271,19 +297,26 @@ pub(crate) fn engine_input(config: &RunConfig, threads: usize, range: IndexRange
 
 pub(crate) fn run_single(
     config: &RunConfig,
-    universe: &Universe,
+    data: &Data<'_>,
     threads: usize,
     range: IndexRange,
 ) -> Result<BacktestResult> {
-    let mut strategy = build(&config.strategy, universe.symbol_count());
-    let input = engine_input(config, threads, range);
-    run_backtest(universe, &input, strategy.as_mut())
+    match data {
+        Data::Full(universe) => {
+            let mut strategy = build(&config.strategy, universe.symbol_count());
+            let input = engine_input(config, threads, range);
+            run_backtest(universe, &input, strategy.as_mut())
+        }
+        Data::Stream { plan, chunk_bars } => {
+            crate::stream::run_streaming(config, plan, threads, range, *chunk_bars)
+        }
+    }
 }
 
 pub(crate) fn run_grid(
     pool: &rayon::ThreadPool,
     grid: &Grid,
-    universe: &Universe,
+    data: &Data<'_>,
     range: IndexRange,
     objective: Objective,
 ) -> Result<Vec<SweepTask>> {
@@ -294,7 +327,7 @@ pub(crate) fn run_grid(
             .par_iter()
             .enumerate()
             .map(|(index, combo)| {
-                let result = run_single(&combo.config, universe, threads, range)?;
+                let result = run_single(&combo.config, data, threads, range)?;
                 let returns = equity_returns(&result.equity, initial_cash);
                 let objective_value = objective.value(&result.metrics);
                 Ok(SweepTask {
@@ -315,7 +348,7 @@ fn run_selected(
     pool: &rayon::ThreadPool,
     grid: &Grid,
     indices: &[usize],
-    universe: &Universe,
+    data: &Data<'_>,
     range: IndexRange,
 ) -> Result<Vec<(usize, BacktestResult)>> {
     let threads = pool.current_num_threads();
@@ -323,7 +356,7 @@ fn run_selected(
         indices
             .par_iter()
             .map(|index| {
-                let result = run_single(&grid.combos[*index].config, universe, threads, range)?;
+                let result = run_single(&grid.combos[*index].config, data, threads, range)?;
                 Ok((*index, result))
             })
             .collect::<Result<Vec<_>>>()
@@ -340,7 +373,7 @@ pub(crate) fn sort_tasks(tasks: &mut [SweepTask]) {
 
 pub(crate) fn execute(
     config: &RunConfig,
-    universe: &Universe,
+    data: &Data<'_>,
     workers: &ResolvedWorkers,
     threads_overridden: bool,
     memory_overridden: bool,
@@ -351,15 +384,15 @@ pub(crate) fn execute(
     })?;
     let started = Instant::now();
     let grid = Grid::build(config)?;
-    if universe.len() < 2 {
+    if data.len() < 2 {
         return Err(ConfigError::Invalid {
             field: "sweep.oos_split".into(),
             message: "样本外切分至少需要 2 根 bar".into(),
         }
         .into());
     }
-    let split_index = ((universe.len() as f64) * sweep.oos_split).round() as usize;
-    let split_index = split_index.clamp(1, universe.len() - 1);
+    let split_index = ((data.len() as f64) * sweep.oos_split).round() as usize;
+    let split_index = split_index.clamp(1, data.len() - 1);
     let warmup = grid.max_warmup_bars();
     let mut oos_warnings = Vec::new();
     if split_index < warmup {
@@ -368,14 +401,11 @@ pub(crate) fn execute(
         ));
     }
     let is_range = IndexRange::head(split_index);
-    let oos_range = IndexRange::with_warmup(
-        split_index.saturating_sub(warmup),
-        split_index,
-        universe.len(),
-    );
+    let oos_range =
+        IndexRange::with_warmup(split_index.saturating_sub(warmup), split_index, data.len());
 
     let pool = build_pool(workers.threads)?;
-    let mut tasks = run_grid(&pool, &grid, universe, is_range, sweep.objective)?;
+    let mut tasks = run_grid(&pool, &grid, data, is_range, sweep.objective)?;
     sort_tasks(&mut tasks);
     let keep = sweep.top_k.min(tasks.len());
     let best_index = tasks
@@ -384,7 +414,7 @@ pub(crate) fn execute(
         .map(|task| task.index);
 
     let top_indices: Vec<usize> = tasks[..keep].iter().map(|task| task.index).collect();
-    let top_runs = run_selected(&pool, &grid, &top_indices, universe, is_range)?;
+    let top_runs = run_selected(&pool, &grid, &top_indices, data, is_range)?;
     let mut top_results = Vec::with_capacity(top_runs.len());
     for (rank, (index, result)) in top_runs.into_iter().enumerate() {
         let result_hash = backtest_report::content_hash(&result)?;
@@ -408,7 +438,7 @@ pub(crate) fn execute(
         .take(OOS_SAMPLE_LIMIT)
         .map(|task| task.index)
         .collect();
-    let oos_runs = run_selected(&pool, &grid, &sample_indices, universe, oos_range)?;
+    let oos_runs = run_selected(&pool, &grid, &sample_indices, data, oos_range)?;
     let oos_metrics: BTreeMap<usize, Metrics> = oos_runs
         .into_iter()
         .map(|(index, result)| (index, result.metrics))
@@ -506,7 +536,7 @@ pub(crate) fn execute(
             split_index,
             oos_warmup_bars: warmup,
             config_hash: config.config_hash.clone(),
-            data_hash: universe.data_hash.clone(),
+            data_hash: data.data_hash().to_string(),
             threads: workers.threads,
             threads_overridden,
             memory_overridden,
@@ -549,12 +579,7 @@ pub(crate) fn execute(
 
     let best_config = best_index.map(|index| &grid.combos[index].config);
     let best_full = match best_config {
-        Some(combo) => run_single(
-            combo,
-            universe,
-            workers.threads,
-            IndexRange::full(universe.len()),
-        )?,
+        Some(combo) => run_single(combo, data, workers.threads, IndexRange::full(data.len()))?,
         None => {
             return Err(ConfigError::Invalid {
                 field: "sweep.grid".into(),
@@ -938,7 +963,7 @@ periods_per_year = 365
             start: config.start,
             end: config.end,
         })?;
-        execute(&config, &universe, &workers, false, false)
+        execute(&config, &Data::Full(&universe), &workers, false, false)
     }
 
     #[test]

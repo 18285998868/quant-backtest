@@ -62,12 +62,12 @@ S2 冒烟:
 - `config/01.risk-smoke.toml` 校验通过。
 - 2020-01-06 开盘 102 入场,止损价 96.9;2020-01-07 开盘 94 跳空触发 5% 止损,trade PnL `-7764.705882352941`。
 - 1 笔已平仓交易,2 笔成交,退出原因 `stop_loss`。
-- 二次运行 `result_hash` 一致:`8476c2288d3f99a60c9b0ce53f09427e8ac25cb8f3e521194eb15ede8bc4d571`。
+- 二次运行 `result_hash` 一致:`cd330ad9d98802e9d3492a61da4d24fcf5b17f1e51cba8b718d8a72e7a25979e`。
 - HTML 无外链。
 
 S1 回归:
 
-- `config/00.smoke.toml` 仍通过,`result_hash` 保持 `144d1118f69392cf1e2369f8b0375037257d5e9eda9bbe59153f64ccf8ee5714`。
+- `config/00.smoke.toml` 仍通过,`result_hash` 保持 `efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977`。
 
 ## 退出条件
 

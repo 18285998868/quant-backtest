@@ -502,6 +502,9 @@ pub struct RunConfig {
     pub output_dir: PathBuf,
     pub threads: ThreadSetting,
     pub memory_limit_gb: f64,
+    /// 分块窗口的 bar 数;0 表示自动(仅在显式内存上限且全量超限时启用)。
+    /// 不参与 `config_hash`。
+    pub chunk_bars: usize,
     pub timeframe: Timeframe,
     pub risk_free_rate: f64,
     pub execution: ExecutionConfig,
@@ -623,6 +626,8 @@ struct RawRun {
     threads: Option<RawThreads>,
     #[serde(default)]
     memory_limit_gb: Option<f64>,
+    #[serde(default)]
+    chunk_bars: Option<usize>,
     timeframe: String,
     #[serde(default)]
     risk_free_rate: f64,
@@ -798,6 +803,7 @@ fn validate(mut raw: RawConfig) -> Result<RunConfig> {
     if !memory_limit_gb.is_finite() || memory_limit_gb < 0.0 {
         return Err(field("run.memory_limit_gb", "必须是有限且 >= 0 的数值"));
     }
+    let chunk_bars = raw.run.chunk_bars.unwrap_or(0);
     let start = raw
         .run
         .start
@@ -960,6 +966,7 @@ fn validate(mut raw: RawConfig) -> Result<RunConfig> {
         output_dir: PathBuf::from(raw.run.output_dir),
         threads,
         memory_limit_gb,
+        chunk_bars,
         timeframe,
         risk_free_rate: raw.run.risk_free_rate,
         execution,
@@ -2034,6 +2041,21 @@ gross = 0.9
             assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
             assert!(message.contains(field_name), "{message}");
         }
+    }
+
+    #[test]
+    fn chunk_bars_is_optional_and_not_hashed() {
+        let text = config_text("1d", ONE_INSTRUMENT);
+        let base = load_text(&text).expect("base");
+        assert_eq!(base.chunk_bars, 0);
+        let chunked = text.replace(
+            "[strategy]",
+            "memory_limit_gb = 0.5\nchunk_bars = 50_000\n\n[strategy]",
+        );
+        let with_chunk = load_text(&chunked).expect("chunked");
+        assert_eq!(with_chunk.chunk_bars, 50_000);
+        assert_eq!(base.config_hash, with_chunk.config_hash);
+        assert_eq!(with_chunk.memory_limit_gb, 0.5);
     }
 
     #[test]

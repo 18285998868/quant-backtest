@@ -74,10 +74,10 @@ target/release/quant-backtest run --config config/02.portfolio-smoke.toml --thre
 
 | 配置 | 结果 |
 | --- | --- |
-| `config/00.smoke.toml`,1 线程 | `result_hash=d771891de94d0082f31f496a173f3645c31256c70c3b6a6d29d26b72f837af1b` |
+| `config/00.smoke.toml`,1 线程 | `result_hash=efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977` |
 | `config/00.smoke.toml`,2 线程 | 同上,`meta.threads=2` |
-| `config/01.risk-smoke.toml` | `result_hash=00c15e27a2e05e4ecaa5e9729c01639d153d7152c1aa59f71485d7b96151d802` |
-| `config/02.portfolio-smoke.toml` | `result_hash=6375664e77d7f0e03dc85d51a7879d3462701fcef9aaf478c0b0fa77817995e0` |
+| `config/01.risk-smoke.toml` | `result_hash=cd330ad9d98802e9d3492a61da4d24fcf5b17f1e51cba8b718d8a72e7a25979e` |
+| `config/02.portfolio-smoke.toml` | `result_hash=d84b79855eae8f066b0ec6024673f8df4cffed2b7029ff9c119c84bb3ba8b1be` |
 
 以上哈希与 S5 验收的 S1–S3 回归表一致,数据、信号与成交语义未变。
 
@@ -100,8 +100,8 @@ target/release/quant-backtest walkforward --config fixtures/walkforward.toml
 - 测试与 release 构建退出码 0。
 - validate、run、portfolio、sweep、walkforward 全部退出码 0。
 - 干净克隆的结果哈希:
-  run `d771891d...`、portfolio `6375664e...`、
-  sweep `6edce9d9...`、walkforward `0bee99bb...`,与 S5 验收记录一致。
+  run `efbb00b9...`、portfolio `d84b7985...`、
+  sweep `41d11ac9...`、walkforward `4f0e7bd6...`,与 S5 验收记录一致。
 - 克隆目录不含 `target/` 与 `out/`,构建与冒烟从零生成。
 
 ## 安全与交付

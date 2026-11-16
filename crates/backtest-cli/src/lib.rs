@@ -16,13 +16,14 @@ use backtest_core::strategy::Strategy;
 use backtest_core::system::{
     Capacity, DEFAULT_WORKER_BUDGET_BYTES, ResolvedWorkers, detect_capacity, resolve_workers,
 };
-use backtest_data::{LoadOptions, LoadSource, load_universe_reporting};
+use backtest_data::{DataPlan, LoadOptions, LoadSource, load_universe_reporting};
 use backtest_report::{ReportExtras, ReportPaths, write_report};
 use backtest_strategy::{SmaCross, build};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 
+mod stream;
 mod sweep;
 mod walkforward;
 
@@ -162,8 +163,9 @@ fn cmd_validate(path: &Path) -> Result<()> {
     let config = load_config(path)?;
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
-    let universe = load(&config)?;
-    print_universe(&config, &universe, &workers);
+    let history = build(&config.strategy, config.instruments.len()).history_bars();
+    let loaded = prepare_data(&config, &workers, 1, history)?;
+    print_data(&config, &loaded, &workers);
     println!("校验通过: {}", path.display());
     Ok(())
 }
@@ -178,26 +180,38 @@ fn cmd_run(
     config.apply_overrides(threads, memory_limit_gb, out)?;
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
-    let universe = load(&config)?;
-    print_universe(&config, &universe, &workers);
+    let history = build(&config.strategy, config.instruments.len()).history_bars();
+    let loaded = prepare_data(&config, &workers, 1, history)?;
+    print_data(&config, &loaded, &workers);
 
-    let mut strategy = build(&config.strategy, config.instruments.len());
-    let input = EngineInput {
-        initial_cash: config.initial_cash,
-        risk_free_rate: config.risk_free_rate,
-        execution: config.execution,
-        risk: config.risk,
-        strategy_name: config.strategy.name().to_string(),
-        params: config.strategy.params(),
-        config_hash: config.config_hash.clone(),
-        threads: workers.threads,
-        requested_start: config.start,
-        requested_end: config.end,
-        start_index: 0,
-        trade_start_index: 0,
-        end_index: universe.len(),
+    let result = match &loaded {
+        Loaded::Full(universe) => {
+            let mut strategy = build(&config.strategy, config.instruments.len());
+            let input = EngineInput {
+                initial_cash: config.initial_cash,
+                risk_free_rate: config.risk_free_rate,
+                execution: config.execution,
+                risk: config.risk,
+                strategy_name: config.strategy.name().to_string(),
+                params: config.strategy.params(),
+                config_hash: config.config_hash.clone(),
+                threads: workers.threads,
+                requested_start: config.start,
+                requested_end: config.end,
+                start_index: 0,
+                trade_start_index: 0,
+                end_index: universe.len(),
+            };
+            run_backtest(universe, &input, strategy.as_mut())?
+        }
+        Loaded::Stream { plan, chunk_bars } => stream::run_streaming(
+            &config,
+            plan,
+            workers.threads,
+            sweep::IndexRange::full(plan.len()),
+            *chunk_bars,
+        )?,
     };
-    let result = run_backtest(&universe, &input, strategy.as_mut())?;
     let extras = ReportExtras::default();
     let paths = write_report(&result, &extras, &config.output_dir)?;
     print_result(&result, &paths);
@@ -221,11 +235,19 @@ fn cmd_sweep(
     config.apply_overrides(threads, memory_limit_gb, out)?;
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
-    let universe = load(&config)?;
-    print_universe(&config, &universe, &workers);
+    let history = sweep::Grid::build(&config)?.max_warmup_bars();
+    let loaded = prepare_data(&config, &workers, workers.threads, history)?;
+    print_data(&config, &loaded, &workers);
+    let data = match &loaded {
+        Loaded::Full(universe) => sweep::Data::Full(universe),
+        Loaded::Stream { plan, chunk_bars } => sweep::Data::Stream {
+            plan,
+            chunk_bars: *chunk_bars,
+        },
+    };
     let run = sweep::execute(
         &config,
-        &universe,
+        &data,
         &workers,
         threads.is_some(),
         memory_limit_gb.is_some(),
@@ -571,6 +593,7 @@ fn synthetic_universe(bars: usize, symbols: usize) -> Universe {
         funding: Vec::new(),
         timeline: ts,
         data_hash: String::new(),
+        base_index: 0,
     }
 }
 
@@ -618,6 +641,91 @@ fn load(config: &RunConfig) -> Result<Universe> {
         println!("数据源: {note}");
     }
     Ok(universe)
+}
+
+/// 已装载的数据:整段驻留,或只保留规划并按窗口读取。
+enum Loaded {
+    Full(Universe),
+    Stream { plan: DataPlan, chunk_bars: usize },
+}
+
+/// 根据显式 `chunk_bars` 或内存上限决定装载方式。
+///
+/// 未配置分块且没有显式内存上限时直接整段装载,避免多扫一遍数据。
+fn prepare_data(
+    config: &RunConfig,
+    workers: &ResolvedWorkers,
+    parallelism: usize,
+    history_bars: usize,
+) -> Result<Loaded> {
+    let decide = config.chunk_bars > 0 || config.memory_limit_gb > 0.0;
+    if !decide {
+        return Ok(Loaded::Full(load(config)?));
+    }
+    let (plan, diagnostics) = stream::plan_data(config)?;
+    if let Some(chunk_bars) = stream::choose_chunk(
+        config.chunk_bars,
+        config.memory_limit_gb,
+        &plan,
+        workers.memory_limit_bytes,
+        parallelism,
+        history_bars,
+    ) {
+        for note in diagnostics.notes {
+            println!("数据源: {note}");
+        }
+        Ok(Loaded::Stream { plan, chunk_bars })
+    } else {
+        Ok(Loaded::Full(load(config)?))
+    }
+}
+
+fn print_data(config: &RunConfig, loaded: &Loaded, workers: &ResolvedWorkers) {
+    match loaded {
+        Loaded::Full(universe) => print_universe(config, universe, workers),
+        Loaded::Stream { plan, chunk_bars } => {
+            print_plan(config, plan, workers, *chunk_bars);
+        }
+    }
+}
+
+fn print_plan(config: &RunConfig, plan: &DataPlan, workers: &ResolvedWorkers, chunk_bars: usize) {
+    let first = plan.timeline.first().copied().map(format_ts);
+    let last = plan.timeline.last().copied().map(format_ts);
+    println!(
+        "数据:{} 个标的,{} 根 bar,{} 至 {}",
+        plan.symbol_count(),
+        plan.len(),
+        first.unwrap_or_else(|| "—".into()),
+        last.unwrap_or_else(|| "—".into())
+    );
+    let full = plan.estimated_data_bytes();
+    let window = plan.bytes_per_bar() * chunk_bars as u64;
+    println!(
+        "数据内存:全量约 {},分块每窗口 {} 根/约 {},另加策略历史",
+        format_bytes(full),
+        chunk_bars,
+        format_bytes(window)
+    );
+    if let Some(limit) = workers.memory_limit_bytes
+        && window > limit
+    {
+        eprintln!(
+            "警告: 单窗口估算 {} 超过内存上限 {}",
+            format_bytes(window),
+            format_bytes(limit)
+        );
+    }
+    println!("哈希:config={} data={}", config.config_hash, plan.data_hash);
+    println!(
+        "标的:{}",
+        plan.specs
+            .iter()
+            .map(|spec| spec.symbol.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("周期: {}", plan.timeframe);
 }
 
 fn print_capacity(workers: &ResolvedWorkers) {

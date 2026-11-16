@@ -4,18 +4,18 @@
 //! 时间线校验与 `data_hash` 计算,因此同一份内容无论来自 CSV 还是归档都得到
 //! 相同哈希。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use csv::StringRecord;
-use sha2::{Digest, Sha256};
 
 use backtest_core::config::{DataInput, SourceConfig};
-use backtest_core::error::{DataError, Result};
+use backtest_core::error::{ConfigError, DataError, Result};
 use backtest_core::model::{BarSeries, FundingSeries, InstrumentSpec, Timeframe, Ts, Universe};
 
 mod archive;
+mod hash;
 
 /// 一次装载的数据入口。
 #[derive(Clone, Copy, Debug)]
@@ -50,6 +50,273 @@ pub struct LoadDiagnostics {
     pub notes: Vec<String>,
 }
 
+/// 分块回放的数据计划:完整时间线、每标的行数、资金费与内容哈希。
+///
+/// 计划阶段不保留 OHLCV,内存只与时间线和资金费成正比。
+#[derive(Clone, Debug)]
+pub struct DataPlan {
+    pub timeframe: Timeframe,
+    pub specs: Vec<InstrumentSpec>,
+    pub timeline: Vec<Ts>,
+    pub funding: Vec<FundingSeries>,
+    pub counts: Vec<usize>,
+    pub data_hash: String,
+}
+
+impl DataPlan {
+    pub fn len(&self) -> usize {
+        self.timeline.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.timeline.is_empty()
+    }
+
+    pub fn symbol_count(&self) -> usize {
+        self.specs.len()
+    }
+
+    /// 全量常驻内存估算,口径与 [`Universe::estimated_data_bytes`] 一致。
+    pub fn estimated_data_bytes(&self) -> u64 {
+        let timeline = self.len() as u64 * std::mem::size_of::<Ts>() as u64;
+        let series = self
+            .counts
+            .iter()
+            .map(|count| *count as u64 * 5 * std::mem::size_of::<f64>() as u64)
+            .sum::<u64>();
+        let funding = self
+            .funding
+            .iter()
+            .map(|item| {
+                item.len() as u64 * (std::mem::size_of::<Ts>() + std::mem::size_of::<f64>()) as u64
+            })
+            .sum::<u64>();
+        timeline + series + funding
+    }
+
+    /// 每多一根 bar 需要为全部标的增加的 OHLCV 字节数。
+    pub fn bytes_per_bar(&self) -> u64 {
+        self.symbol_count() as u64 * 5 * std::mem::size_of::<f64>() as u64
+    }
+}
+
+/// 规划数据:流式读取并计算 v2 `data_hash`,不保留 OHLCV。
+pub fn plan_universe_reporting(options: &LoadOptions<'_>) -> Result<(DataPlan, LoadDiagnostics)> {
+    if options.instruments.is_empty() {
+        let path = match options.source {
+            LoadSource::Csv(path) => path.to_path_buf(),
+            LoadSource::Archive(source) => source.root().to_path_buf(),
+        };
+        return Err(DataError::Empty { path }.into());
+    }
+    match options.source {
+        LoadSource::Csv(path) => plan_csv(options, path),
+        LoadSource::Archive(_) => plan_archive(options),
+    }
+}
+
+fn plan_csv(options: &LoadOptions<'_>, path: &Path) -> Result<(DataPlan, LoadDiagnostics)> {
+    let mut timeline: Vec<Ts> = Vec::new();
+    let mut timeline_symbol: Option<usize> = None;
+    let mut counts = vec![0usize; options.instruments.len()];
+    let mut hasher = hash::DataHasher::new(options.instruments.len());
+    scan_csv(
+        path,
+        options.instruments,
+        options.start,
+        options.end,
+        &mut |symbol_id, bar| {
+            if timeline_symbol.is_none() {
+                timeline_symbol = Some(symbol_id);
+            }
+            if timeline_symbol == Some(symbol_id) {
+                timeline.push(bar.ts);
+            } else if let Some(expected) = timeline.get(counts[symbol_id]) {
+                if *expected != bar.ts {
+                    return Err(DataError::TimelineMismatch {
+                        symbol: bar.symbol.clone(),
+                        expected: Some(*expected),
+                        actual: Some(bar.ts),
+                    }
+                    .into());
+                }
+            } else {
+                return Err(DataError::TimelineMismatch {
+                    symbol: bar.symbol.clone(),
+                    expected: None,
+                    actual: Some(bar.ts),
+                }
+                .into());
+            }
+            counts[symbol_id] += 1;
+            hasher.push(
+                symbol_id,
+                bar.ts,
+                [bar.open, bar.high, bar.low, bar.close, bar.volume],
+            );
+            Ok(())
+        },
+    )?;
+    if timeline.is_empty() {
+        return Err(DataError::Empty {
+            path: path.to_path_buf(),
+        }
+        .into());
+    }
+    for (index, spec) in options.instruments.iter().enumerate() {
+        if counts[index] != timeline.len() {
+            return Err(DataError::MissingSymbolData {
+                symbol: spec.symbol.clone(),
+            }
+            .into());
+        }
+    }
+    let funding = Vec::new();
+    let data_hash = hasher.finish(options.instruments, &funding);
+    Ok((
+        DataPlan {
+            timeframe: options.timeframe,
+            specs: options.instruments.to_vec(),
+            timeline,
+            funding,
+            counts,
+            data_hash,
+        },
+        LoadDiagnostics::default(),
+    ))
+}
+
+fn plan_archive(options: &LoadOptions<'_>) -> Result<(DataPlan, LoadDiagnostics)> {
+    let mut timeline: Vec<Ts> = Vec::new();
+    let mut counts = vec![0usize; options.instruments.len()];
+    let mut hasher = hash::DataHasher::new(options.instruments.len());
+    let mut funding: Vec<FundingSeries> = Vec::new();
+    let mut notes = Vec::new();
+    for (symbol_id, spec) in options.instruments.iter().enumerate() {
+        let single = [spec.clone()];
+        let one = LoadOptions {
+            source: options.source,
+            timeframe: options.timeframe,
+            instruments: &single,
+            start: options.start,
+            end: options.end,
+        };
+        let (universe, diagnostics) = load_universe_reporting(&one)?;
+        notes.extend(diagnostics.notes);
+        let series = &universe.series[0];
+        if timeline.is_empty() {
+            timeline = series.ts.clone();
+        } else if series.ts != timeline {
+            let index = series
+                .ts
+                .iter()
+                .zip(&timeline)
+                .position(|(left, right)| left != right)
+                .unwrap_or(series.ts.len().min(timeline.len()));
+            return Err(DataError::TimelineMismatch {
+                symbol: spec.symbol.clone(),
+                expected: timeline.get(index).copied(),
+                actual: series.ts.get(index).copied(),
+            }
+            .into());
+        }
+        counts[symbol_id] = series.len();
+        for index in 0..series.len() {
+            hasher.push(
+                symbol_id,
+                series.ts[index],
+                [
+                    series.open[index],
+                    series.high[index],
+                    series.low[index],
+                    series.close[index],
+                    series.volume[index],
+                ],
+            );
+        }
+        if let Some(mut item) = universe.funding.into_iter().next() {
+            item.symbol = symbol_id as u32;
+            funding.push(item);
+        }
+    }
+    if !funding.is_empty() {
+        validate_funding(&funding, options.instruments)?;
+    }
+    let data_hash = hasher.finish(options.instruments, &funding);
+    Ok((
+        DataPlan {
+            timeframe: options.timeframe,
+            specs: options.instruments.to_vec(),
+            timeline,
+            funding,
+            counts,
+            data_hash,
+        },
+        LoadDiagnostics { notes },
+    ))
+}
+
+/// 按绝对下标加载一块数据。窗口可向前带 `history` 根,供策略读取历史。
+pub fn load_window(
+    plan: &DataPlan,
+    options: &LoadOptions<'_>,
+    start_index: usize,
+    end_index: usize,
+    history: usize,
+) -> Result<Universe> {
+    if start_index >= end_index || end_index > plan.len() {
+        return Err(ConfigError::Invalid {
+            field: "chunk".into(),
+            message: format!(
+                "窗口 [{start_index}, {end_index}) 超出数据范围 [0, {})",
+                plan.len()
+            ),
+        }
+        .into());
+    }
+    let window_start = start_index.saturating_sub(history);
+    let start_ts = plan.timeline[window_start];
+    let end_ts = plan
+        .timeline
+        .get(end_index - 1)
+        .and_then(|ts| ts.checked_add(1))
+        .ok_or(DataError::TimestampRange { value: i64::MAX })?;
+    let window_options = LoadOptions {
+        source: options.source,
+        timeframe: plan.timeframe,
+        instruments: &plan.specs,
+        start: Some(start_ts),
+        end: Some(end_ts),
+    };
+    let (mut universe, _) = load_universe_reporting(&window_options)?;
+    let expected_len = end_index - window_start;
+    for (symbol, series) in universe.series.iter().enumerate() {
+        if series.len() != expected_len {
+            return Err(DataError::TimelineMismatch {
+                symbol: plan.specs[symbol].symbol.clone(),
+                expected: plan.timeline.get(end_index - 1).copied(),
+                actual: series.ts.last().copied(),
+            }
+            .into());
+        }
+        for (local, ts) in series.ts.iter().enumerate() {
+            if *ts != plan.timeline[window_start + local] {
+                return Err(DataError::TimelineMismatch {
+                    symbol: plan.specs[symbol].symbol.clone(),
+                    expected: plan.timeline.get(window_start + local).copied(),
+                    actual: Some(*ts),
+                }
+                .into());
+            }
+        }
+    }
+    universe.timeline = plan.timeline.clone();
+    universe.funding = plan.funding.clone();
+    universe.data_hash = plan.data_hash.clone();
+    universe.base_index = window_start;
+    Ok(universe)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RawBar {
     pub symbol: String,
@@ -76,13 +343,23 @@ pub fn load_universe_reporting(options: &LoadOptions<'_>) -> Result<(Universe, L
         return Err(DataError::Empty { path }.into());
     }
     let (bars, funding, diagnostics) = match options.source {
-        LoadSource::Csv(path) => (read_csv(path)?, Vec::new(), LoadDiagnostics::default()),
+        LoadSource::Csv(path) => (
+            read_csv(path, options.instruments, options.start, options.end)?,
+            Vec::new(),
+            LoadDiagnostics::default(),
+        ),
         LoadSource::Archive(source) => archive::load(options, source)?,
     };
     finalize(options, bars, funding, diagnostics)
 }
 
-fn read_csv(path: &Path) -> Result<Vec<RawBar>> {
+fn scan_csv(
+    path: &Path,
+    instruments: &[InstrumentSpec],
+    start: Option<Ts>,
+    end: Option<Ts>,
+    sink: &mut dyn FnMut(usize, RawBar) -> Result<()>,
+) -> Result<()> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
@@ -96,8 +373,14 @@ fn read_csv(path: &Path) -> Result<Vec<RawBar>> {
         message: source.to_string(),
     })?;
     let columns = Columns::new(headers, path)?;
+    let ids: HashMap<&str, usize> = instruments
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| (spec.symbol.as_str(), index))
+        .collect();
+    let start = start.unwrap_or(i64::MIN);
+    let end = end.unwrap_or(i64::MAX);
 
-    let mut bars = Vec::new();
     let mut last_symbol: Option<String> = None;
     let mut last_ts: Option<Ts> = None;
     for record in reader.records() {
@@ -107,6 +390,11 @@ fn read_csv(path: &Path) -> Result<Vec<RawBar>> {
         })?;
         let row = record.position().map(|p| p.line()).unwrap_or(0);
         let bar = parse_record(&record, &columns, path, row)?;
+        let symbol_id = *ids
+            .get(bar.symbol.as_str())
+            .ok_or_else(|| DataError::UnknownSymbol {
+                symbol: bar.symbol.clone(),
+            })?;
         if let Some(prev_symbol) = &last_symbol {
             if bar.symbol == *prev_symbol {
                 if let Some(prev_ts) = last_ts {
@@ -135,9 +423,33 @@ fn read_csv(path: &Path) -> Result<Vec<RawBar>> {
         }
         last_ts = Some(bar.ts);
         last_symbol = Some(bar.symbol.clone());
-        bars.push(bar);
+        if bar.ts >= start && bar.ts < end {
+            sink(symbol_id, bar)?;
+        }
     }
+    Ok(())
+}
+
+fn read_csv(
+    path: &Path,
+    instruments: &[InstrumentSpec],
+    start: Option<Ts>,
+    end: Option<Ts>,
+) -> Result<Vec<RawBar>> {
+    let mut bars = Vec::new();
+    scan_csv(path, instruments, start, end, &mut |_, bar| {
+        bars.push(bar);
+        Ok(())
+    })?;
     if bars.is_empty() {
+        if start.is_some() || end.is_some() {
+            return Err(DataError::EmptyRange {
+                symbol: instruments[0].symbol.clone(),
+                start: start.unwrap_or(i64::MIN),
+                end: end.unwrap_or(i64::MAX),
+            }
+            .into());
+        }
         return Err(DataError::Empty {
             path: path.to_path_buf(),
         }
@@ -300,6 +612,7 @@ fn finalize(
             funding,
             timeline,
             data_hash,
+            base_index: 0,
         },
         diagnostics,
     ))
@@ -505,48 +818,29 @@ fn compute_data_hash(
     specs: &[InstrumentSpec],
     funding: &[FundingSeries],
 ) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"quant-backtest/data/v1");
-    hasher.update((series.len() as u64).to_le_bytes());
-    for (item, spec) in series.iter().zip(specs) {
-        hasher.update((spec.symbol.len() as u64).to_le_bytes());
-        hasher.update(spec.symbol.as_bytes());
-        hasher.update((item.ts.len() as u64).to_le_bytes());
-        for index in 0..item.ts.len() {
-            hasher.update(item.ts[index].to_le_bytes());
-            hasher.update(item.open[index].to_le_bytes());
-            hasher.update(item.high[index].to_le_bytes());
-            hasher.update(item.low[index].to_le_bytes());
-            hasher.update(item.close[index].to_le_bytes());
-            hasher.update(item.volume[index].to_le_bytes());
+    let mut hasher = hash::DataHasher::new(series.len());
+    for (symbol, item) in series.iter().enumerate() {
+        for index in 0..item.len() {
+            hasher.push(
+                symbol,
+                item.ts[index],
+                [
+                    item.open[index],
+                    item.high[index],
+                    item.low[index],
+                    item.close[index],
+                    item.volume[index],
+                ],
+            );
         }
     }
-    if !funding.is_empty() {
-        hasher.update(b"quant-backtest/funding/v1");
-        hasher.update((funding.len() as u64).to_le_bytes());
-        for (item, spec) in funding.iter().zip(specs) {
-            hasher.update((spec.symbol.len() as u64).to_le_bytes());
-            hasher.update(spec.symbol.as_bytes());
-            hasher.update((item.ts.len() as u64).to_le_bytes());
-            for index in 0..item.ts.len() {
-                hasher.update(item.ts[index].to_le_bytes());
-                hasher.update(item.rate[index].to_le_bytes());
-            }
-        }
-    }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    hasher.finish(specs, funding)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use backtest_core::error::{DataError, Error};
+    use backtest_core::error::{ConfigError, DataError, Error};
     use std::path::PathBuf;
 
     const HEADER: &str = "ts,symbol,open,high,low,close,volume\n";
@@ -797,6 +1091,82 @@ mod tests {
             )
             .expect_err("must fail");
             assert!(matches!(error, Error::Data(DataError::Funding { .. })));
+        }
+    }
+
+    #[test]
+    fn plan_matches_full_load_and_windows_keep_absolute_indexes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut body = HEADER.to_string();
+        for index in 0..10 {
+            body.push_str(&row(index, "AAA", 100.0, 101.0, 99.0, 100.0));
+        }
+        for index in 0..10 {
+            body.push_str(&row(index, "BBB", 200.0, 201.0, 199.0, 200.0));
+        }
+        let path = write_csv(dir.path(), "bars.csv", &body);
+        let specs = [spec("AAA"), spec("BBB")];
+        let options = LoadOptions {
+            source: LoadSource::Csv(&path),
+            timeframe: Timeframe::ONE_DAY,
+            instruments: &specs,
+            start: None,
+            end: None,
+        };
+        let (plan, _) = plan_universe_reporting(&options).expect("plan");
+        let full = load(&path, &specs).expect("load");
+        assert_eq!(plan.len(), 10);
+        assert_eq!(plan.counts, vec![10, 10]);
+        assert_eq!(plan.symbol_count(), 2);
+        assert_eq!(plan.data_hash, full.data_hash);
+        assert_eq!(plan.estimated_data_bytes(), full.estimated_data_bytes());
+
+        let window = load_window(&plan, &options, 3, 7, 2).expect("window");
+        assert_eq!(window.base_index, 1);
+        assert_eq!(window.window_start(), 1);
+        assert_eq!(window.window_end(), 7);
+        assert_eq!(window.len(), 10);
+        assert_eq!(window.series[0].len(), 6);
+        assert_eq!(window.timeline, full.timeline);
+        assert_eq!(window.data_hash, full.data_hash);
+        assert!(window.funding.is_empty());
+        for index in 1..7 {
+            assert_eq!(window.bar(0, index).ts, full.bar(0, index).ts);
+            assert_eq!(window.bar(0, index).close, full.bar(0, index).close);
+            assert_eq!(window.bar(1, index).ts, full.bar(1, index).ts);
+            assert_eq!(window.bar(1, index).close, full.bar(1, index).close);
+        }
+
+        let head = load_window(&plan, &options, 0, 2, 5).expect("head");
+        assert_eq!(head.base_index, 0);
+        assert_eq!(head.series[0].len(), 2);
+        let tail = load_window(&plan, &options, 8, 10, 5).expect("tail");
+        assert_eq!(tail.base_index, 3);
+        assert_eq!(tail.window_start(), 3);
+        assert_eq!(tail.window_end(), 10);
+        assert_eq!(tail.series[0].len(), 7);
+    }
+
+    #[test]
+    fn load_window_rejects_out_of_range_chunks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut body = HEADER.to_string();
+        for index in 0..4 {
+            body.push_str(&row(index, "AAA", 100.0, 101.0, 99.0, 100.0));
+        }
+        let path = write_csv(dir.path(), "bars.csv", &body);
+        let specs = [spec("AAA")];
+        let options = LoadOptions {
+            source: LoadSource::Csv(&path),
+            timeframe: Timeframe::ONE_DAY,
+            instruments: &specs,
+            start: None,
+            end: None,
+        };
+        let (plan, _) = plan_universe_reporting(&options).expect("plan");
+        for (start, end) in [(2, 2), (3, 2), (0, 5)] {
+            let error = load_window(&plan, &options, start, end, 0).expect_err("must fail");
+            assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
         }
     }
 }

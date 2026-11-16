@@ -61,15 +61,15 @@ deny/audit 使用本地 advisory 库离线运行;在线拉取因远程 TLS 失�
 S3 冒烟:
 
 - `config/02.portfolio-smoke.toml` 校验通过,2 个标的、12 根 bar。
-- 配置哈希 `a434c549b6e95f5cb5c5f3aae15eb1528a3048b8bccfaaf847de8960adbf6766`,数据哈希 `dcd6725781a9d96ff083476d1bddb4681d057cb71307e4e1bbd80a912c8f5b20`。
+- 配置哈希 `a434c549b6e95f5cb5c5f3aae15eb1528a3048b8bccfaaf847de8960adbf6766`,数据哈希 `594e1b26d5e48f28a0ef94a7a85c9d8bd0591ebab9d3b5902ac555a07b93395e`。
 - 总收益 5.09%,CAGR 420.21%,最大回撤 4.35%;4 笔交易,10 笔成交,0 条告警。
-- 二次运行 `result_hash` 一致:`8796ce7f400ccbd6a30592c2a98bfba0258b53f609e108a07767fc7a17e2a411`。
+- 二次运行 `result_hash` 一致:`d84b79855eae8f066b0ec6024673f8df4cffed2b7029ff9c119c84bb3ba8b1be`。
 - `result.json` 可解析,`report.html` 无外链。
 
 S1/S2 回归:
 
-- `config/00.smoke.toml` 的 `result_hash` 保持 `144d1118f69392cf1e2369f8b0375037257d5e9eda9bbe59153f64ccf8ee5714`。
-- `config/01.risk-smoke.toml` 的 `result_hash` 保持 `8476c2288d3f99a60c9b0ce53f09427e8ac25cb8f3e521194eb15ede8bc4d571`。
+- `config/00.smoke.toml` 的 `result_hash` 保持 `efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977`。
+- `config/01.risk-smoke.toml` 的 `result_hash` 保持 `cd330ad9d98802e9d3492a61da4d24fcf5b17f1e51cba8b718d8a72e7a25979e`。
 
 ## 退出条件
 

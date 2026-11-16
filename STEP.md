@@ -84,8 +84,11 @@ cargo run --release -- bench --scale
 
 直连 Binance/Dukascopy 归档时,把配置中的 `run.data` 换成顶层 `[source]`;
 Binance 期货默认结算资金费,可用 `source.funding = false` 关闭。
-验收证据见 [M2 归档数据源](./STEP.d/12-archive-source.md) 与
-[M3 资金费](./STEP.d/13-funding.md)。
+分钟级数据可设 `run.chunk_bars` 或 `run.memory_limit_gb` 按窗口装载,
+命令不变;整段与分块结果哈希一致。
+验收证据见 [M2 归档数据源](./STEP.d/12-archive-source.md)、
+[M3 资金费](./STEP.d/13-funding.md) 与
+[M4 分块流式加载](./STEP.d/14-chunking.md)。
 
 ## 步骤
 
@@ -103,3 +106,4 @@ Binance 期货默认结算资金费,可用 `source.funding = false` 关闭。
 - [11 M1 多周期验收](./STEP.d/11-m1-acceptance.md)
 - [12 M2 归档数据源验收](./STEP.d/12-archive-source.md)
 - [13 M3 资金费验收](./STEP.d/13-funding.md)
+- [14 M4 分块流式加载验收](./STEP.d/14-chunking.md)

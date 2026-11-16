@@ -382,6 +382,7 @@ mod tests {
             funding: Vec::new(),
             timeline: ts,
             data_hash: String::new(),
+            base_index: 0,
         }
     }
 

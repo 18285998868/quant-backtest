@@ -223,11 +223,14 @@ impl FundingSeries {
 pub struct Universe {
     pub timeframe: Timeframe,
     pub specs: Vec<InstrumentSpec>,
+    /// 当前窗口的 OHLCV;分块回放时只含窗口范围,配合 `base_index` 定位。
     pub series: Vec<BarSeries>,
     /// 与 `series` 等长;未启用资金费时为空。
     pub funding: Vec<FundingSeries>,
     pub timeline: Vec<Ts>,
     pub data_hash: String,
+    /// `series` 第一根 bar 在完整时间线中的绝对下标。
+    pub base_index: usize,
 }
 
 impl Universe {
@@ -262,29 +265,40 @@ impl Universe {
     }
 
     pub fn bar(&self, symbol: SymbolId, index: usize) -> BarView {
+        let local = index - self.base_index;
         let series = &self.series[symbol as usize];
         BarView {
             symbol,
-            ts: series.ts[index],
-            open: series.open[index],
-            high: series.high[index],
-            low: series.low[index],
-            close: series.close[index],
-            volume: series.volume[index],
+            ts: series.ts[local],
+            open: series.open[local],
+            high: series.high[local],
+            low: series.low[local],
+            close: series.close[local],
+            volume: series.volume[local],
         }
     }
 
     pub fn try_bar(&self, symbol: SymbolId, index: usize) -> Option<BarView> {
+        let local = index.checked_sub(self.base_index)?;
         let series = self.series.get(symbol as usize)?;
         Some(BarView {
             symbol,
-            ts: *series.ts.get(index)?,
-            open: *series.open.get(index)?,
-            high: *series.high.get(index)?,
-            low: *series.low.get(index)?,
-            close: *series.close.get(index)?,
-            volume: *series.volume.get(index)?,
+            ts: *series.ts.get(local)?,
+            open: *series.open.get(local)?,
+            high: *series.high.get(local)?,
+            low: *series.low.get(local)?,
+            close: *series.close.get(local)?,
+            volume: *series.volume.get(local)?,
         })
+    }
+
+    /// 当前窗口覆盖的绝对下标范围 `[start, end)`。
+    pub fn window_start(&self) -> usize {
+        self.base_index
+    }
+
+    pub fn window_end(&self) -> usize {
+        self.base_index + self.series.first().map_or(0, BarSeries::len)
     }
 
     pub fn len(&self) -> usize {
@@ -578,6 +592,7 @@ mod tests {
             funding: Vec::new(),
             timeline: vec![0; 3],
             data_hash: String::new(),
+            base_index: 0,
         };
         assert_eq!(universe.estimated_data_bytes(), 3 * 8 + 2 * 3 * 5 * 8);
     }

@@ -75,24 +75,24 @@ audit 与 release 构建全部通过。
 
 | 场景 | 数据 | bar 数 | `data_hash` | `result_hash` |
 | --- | --- | --- | --- | --- |
-| Binance 单标的 1h | BTCUSDT 2024-01 | 744 | `d79c1706...` | `5787aa02...` |
-| 等价 CSV | 同上 | 744 | `d79c1706...` | `5787aa02...` |
-| Binance 单标的 1m | BTCUSDT 2023-06 | 43200 | `0374b43a...` | `4c82b97a...` |
-| Binance 4 标的 1h | BTC/ETH/BNB/SOL 2024-01 | 744 | `fec3c66b...` | `669ad911...` |
-| Dukascopy 单标的 1h | EURUSD 2023-07 | 743 | `307e4e3d...` | `8516fb78...` |
+| Binance 单标的 1h | BTCUSDT 2024-01 | 744 | `b527ca0a...` | `c64051ce...` |
+| 等价 CSV | 同上 | 744 | `b527ca0a...` | `c64051ce...` |
+| Binance 单标的 1m | BTCUSDT 2023-06 | 43200 | `c272ef22...` | `6450e362...` |
+| Binance 4 标的 1h | BTC/ETH/BNB/SOL 2024-01 | 744 | `743e2f52...` | `5d6569d7...` |
+| Dukascopy 单标的 1h | EURUSD 2023-07 | 743 | `7958c2a5...` | `751b4c20...` |
 
 完整哈希:
 
 - Binance 1h / CSV:`data_hash` =
-  `d79c170636eb695209f98bccb514dff1b656daa38cab81ec089b991f2a45bc0e`,
+  `b527ca0a7b3ff8a20510d92a55d1fc8af6c268f8d4cbbfa628020fef51885ffd`,
   `result_hash` =
-  `5787aa022674755b747c444c282d88a95a641cbaace0fbf94146bbe0482453f5`。
+  `c64051cebda7292b225defc3f45aaf240dd1489c75ac25b963f03af206db0bb8`。
 - Binance 1m:`data_hash` =
-  `0374b43aa2151dea7661f018b3df58cc75a27d682995f323b02b5e059bd30988`。
+  `c272ef223fe0553b57483d5e8b7a16bb3c4559ef76131bce31864d30f788ec6f`。
 - 4 标的 1h:`data_hash` =
-  `fec3c66bc3e3c812917f076d1d8cd8be2f6c9e2347123cf8da8221da76b71516`。
+  `743e2f52789f7cf3c263c1493970ae0a63d17c28e97bd4bc9b3931ae4b550873`。
 - Dukascopy 1h:`data_hash` =
-  `307e4e3d1d1c3feceeafd36bddb59e85d035d8bd6a09dace5ea32730cc907cd9`。
+  `7958c2a5608663481689e4368abaaccd899a0d7d2bb62016a9f40eb5c42f2b71`。
 
 ## 关键断言
 

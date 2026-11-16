@@ -9,7 +9,7 @@
 | 用例 | 证据 |
 | --- | --- |
 | T4.1 串并行一致 | `serial_and_parallel_metrics_match`:100 组参数,1 线程与 2 线程逐任务 `params`、`config_hash`、`sharpe`、`cagr`、`total_return` 完全相等,顺序一致 |
-| T4.2 确定性 | `repeated_sweeps_have_same_hash`;冒烟配置 auto/1/2 线程的 `sweep_hash` 均为 `3e92bf60...` |
+| T4.2 确定性 | `repeated_sweeps_have_same_hash`;冒烟配置 auto/1/2 线程的 `sweep_hash` 均为 `9fe1c058...` |
 | T4.3 非法组合 | `invalid_combinations_are_skipped`、`all_invalid_combinations_are_an_error`;冒烟 27 组中 18 有效、9 组 `fast >= slow` 被跳过 |
 | T4.4 内存 | 1000 组、top_k=20、6 bar:仅保留 20 条权益曲线,120 个权益点,保留字节估算 6,240,峰值 RSS 41,312,256 |
 | T4.5 缩放基准 | 1000 任务 × 2500 bar:2 线程 SMA 28,994,861 symbol-bar/s,1.25e9 步外推 0.7 分钟;8 线程 84,871,264,0.2 分钟 |
@@ -49,8 +49,8 @@ bash scripts/check.sh --ci
 
 - 从空 `target/smoke-s4` 开始,使用 `config/03.sweep.toml` 与 `fixtures/sma_6bars.csv`。
 - 27 组参数,18 有效,9 组非法跳过,0 条策略告警;目标 `cagr`,top_k=3。
-- 配置哈希 `37bbb0c2bfeefb5046f1c5833e7f477749a97efdbfd265180d99f1e42a3541a8`,数据哈希 `a8809713cdf982353411fad97d2ea0d356908da939419b84c4e27147995f6556`。
-- `sweep_hash` 为 `3e92bf6083eb48f0f6695f5c93fdb9c576955e7c24bc77f73f1af5a64dc08e1e`,auto、1、2 线程一致。
+- 配置哈希 `37bbb0c2bfeefb5046f1c5833e7f477749a97efdbfd265180d99f1e42a3541a8`,数据哈希 `93b7c76a45011f76bf1d7962fc51cc4d953feb2508681f92a8bac5c19c6b198b`。
+- `sweep_hash` 为 `9fe1c058bc62427818af5a011f6a6c51bf3f10eb0b35f5e9220bf038fcb1eec`,auto、1、2 线程一致。
 - top 3 结果均含权益、成交、交易、回撤、月收益与告警;第一名参数 `fast=1, slow=2, weight=0.99`,CAGR 1.025053,Sharpe 7.799573。
 - `sweep.csv` 行数包含全部 18 个有效组合;`sweep_summary.json` 可解析,top 3 各 6 个权益点。
 - 峰值 RSS 5,054,464 字节;保留权益点 18 个,保留字节估算 936。
@@ -81,9 +81,9 @@ T4.4 与 T4.6–T4.9 的关键值见用例表。T4.4 的 1000 组扫描耗时 13
 
 ## S1–S3 回归
 
-- S1 `config/00.smoke.toml`:`144d1118f69392cf1e2369f8b0375037257d5e9eda9bbe59153f64ccf8ee5714`。
-- S2 `config/01.risk-smoke.toml`:`8476c2288d3f99a60c9b0ce53f09427e8ac25cb8f3e521194eb15ede8bc4d571`。
-- S3 `config/02.portfolio-smoke.toml`:`8796ce7f400ccbd6a30592c2a98bfba0258b53f609e108a07767fc7a17e2a411`。
+- S1 `config/00.smoke.toml`:`efbb00b9f70690e5238630c65dea13922621fff36059ec26367fee66e067b977`。
+- S2 `config/01.risk-smoke.toml`:`cd330ad9d98802e9d3492a61da4d24fcf5b17f1e51cba8b718d8a72e7a25979e`。
+- S3 `config/02.portfolio-smoke.toml`:`d84b79855eae8f066b0ec6024673f8df4cffed2b7029ff9c119c84bb3ba8b1be`。
 
 ## 退出条件
 
