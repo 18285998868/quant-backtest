@@ -24,7 +24,7 @@
 | 窗口边界 | `[start, end)` 绝对下标,连续、不重叠、不留空洞 |
 | 策略历史 | 块首可带 `strategy.history_bars()` 根,只读、不重放 |
 | 状态延续 | `EngineState` 携带现金、持仓、挂单、目标权重、权益、成交、交易、告警、资金费光标与下一根下标 |
-| 支持命令 | `run`、`validate`、`sweep`;`walkforward` 首版整段装载 |
+| 支持命令 | M4 为 `run`、`validate`、`sweep`;`walkforward` 由 M5 接入 |
 | `config_hash` | 不含 `chunk_bars`;改窗口大小不改变配置哈希 |
 
 `chunk_bars` 与内存估算的 CLI 输出示例:
@@ -201,6 +201,7 @@ v2 上线后,旧 `data_hash`/`result_hash`/`sweep_hash` 全部失效并重录;
 - 归档窗口仍克隆完整时间线与资金费;CSV 每窗口整文件重扫,分块以时间
   换内存。
 - `sweep` 每个 trial 独立流式读取,窗口不在 trial 间共享。
-- `walkforward` 首版仍整段装载。
+- M4 范围内 `walkforward` 仍整段装载;M5 已将其接入分块,
+  见 [M5 验收](./15-walkforward-chunking.md)。
 - 43k bar 样本的进程峰值 RSS 由二进制基线主导,内存收益需在超大样本
   与目标机上实测;必要时先缩小 `run.start/run.end` 或改用更粗周期。

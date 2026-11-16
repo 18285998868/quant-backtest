@@ -53,6 +53,9 @@
 - M4:数据哈希升级为 v2 固定页 `PAGE_BARS = 65_536`,支持时间分块汇总;资金费段同步升为 `quant-backtest/funding/v2`。
 - M4:CSV/归档读取新增 `DataPlan`、`plan_universe_reporting()` 与 `load_window()`;CLI 输出全量与单窗口内存估算。
 - M4:新增 `crates/backtest-data/src/hash.rs`、`crates/backtest-cli/src/stream.rs`、`STEP.d/14-chunking.md` 与 `docs/changes/008-chunked-streaming.md`。
+- M5:`walkforward` 接入 `chunk_bars`/`memory_limit_gb` 分块,训练网格与 OOS 测试共用 `sweep::Data` 与 `run_single` 路径。
+- M5:`walkforward::execute` 改为接收 `sweep::Data`,窗口规划、时间戳与 `data_hash` 不再依赖整段 `Universe`;无新增配置、CLI 或报告字段。
+- M5:新增整段/分块 walkforward 单测与 CLI 契约测试,覆盖窗口参数、OOS 净值、参数稳定性、DSR 与资金费;新增 `STEP.d/15-walkforward-chunking.md` 与 `docs/changes/009-walkforward-chunking.md`。
 
 ### 验收
 
@@ -109,3 +112,21 @@
 - 提交 `727f311` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(172 个)与 `cargo build --release --locked`;
   1m 与 4 标的 1h 的整段/分块哈希、spot 冒烟 `efbb00b9...` 均与工作副本一致。
+- 2026-11-16:M5 验收,174 个测试、fmt、check、clippy、release 构建与
+  `scripts/check.sh --ci` 全部通过。
+- `fixtures/walkforward.toml`(180/60/60/1,`chunk_bars=50`):整段与分块
+  `result_hash` 同为 `4f0e7bd6...`,3 个窗口、OOS 净值/指标、参数稳定性、
+  DSR 与跳过窗口一致。
+- BTCUSDT UM 1m 2023-06(43199 bar,`chunk_bars=5000`):整段与分块
+  `result_hash` 同为 `0fd37671...`、`data_hash` 同为 `d9dc81d8...`,
+  4 个窗口、1033 笔 OOS 交易与 42 次资金费结算一致。
+- BTC/ETH/BNB/SOL UM 1h 2024-01(744 bar,`chunk_bars=100`):整段与分块
+  `result_hash` 同为 `9981eeaf...`、`data_hash` 同为 `da7521b2...`,
+  3 个窗口、86 笔交易与 90 次 OOS 资金费结算一致。
+- 显式 `chunk_bars` 大于数据长度时回退整段,哈希与整段一致;
+  自动分块路径由共享 `choose_chunk()` 单测覆盖。
+- 1m walk-forward 分块耗时约为整段的 19.5 倍(2.706 s 对 0.139 s),
+  以时间换内存;43k bar 样本 RSS 由装载峰值主导,不用于证明内存收益。
+- 提交 `待补` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(174 个)与 `cargo build --release --locked`;
+  夹具、1m 与 4 标的 1h 的整段/分块哈希与工作副本一致。

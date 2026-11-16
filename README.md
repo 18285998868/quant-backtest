@@ -53,10 +53,11 @@ Binance `futures/um`/`futures/cm` 默认按归档资金费结算,结果与报告
 
 分钟级大样本可设置 `run.chunk_bars`(正整数)强制按窗口装载,或设置
 `run.memory_limit_gb > 0` 让全量估算超限时自动分块。窗口按绝对下标回放,
-策略历史只读、引擎状态延续;整段与分块的 `data_hash`、`result_hash` 与
-`sweep_hash` 一致。`walkforward` 首版仍整段装载。契约见
+策略历史只读、引擎状态延续;`run`、`sweep` 与 `walkforward` 的整段/分块
+`data_hash`、`result_hash` 与 `sweep_hash` 一致。契约见
 [流程设计 §3.10](./docs/03-流程设计.md),验收见
-[M4 分块流式加载](./STEP.d/14-chunking.md)。
+[M4 分块流式加载](./STEP.d/14-chunking.md) 与
+[M5 walk-forward 分块](./STEP.d/15-walkforward-chunking.md)。
 
 ## 测试与门禁
 

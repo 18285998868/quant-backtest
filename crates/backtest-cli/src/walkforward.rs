@@ -4,20 +4,18 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use backtest_core::config::{RunConfig, WalkForwardConfig};
-use backtest_core::engine::run_backtest;
 use backtest_core::error::{ConfigError, Result};
 use backtest_core::metrics::{
     MetricInput, compute_metrics, deflated_sharpe, drawdown_episodes, equity_returns,
     monthly_returns,
 };
 use backtest_core::model::{
-    BacktestResult, FillRecord, FundingSummary, RunMeta, SymbolFunding, TradeRecord, Universe,
+    BacktestResult, FillRecord, FundingSummary, RunMeta, SymbolFunding, TradeRecord,
 };
 use backtest_core::system::ResolvedWorkers;
 use backtest_core::walkforward::{
     WalkForwardResult, WalkForwardWindow, param_stability, plan_gaps, plan_windows, stitch_oos,
 };
-use backtest_strategy::build;
 use chrono::{SecondsFormat, Utc};
 
 use crate::sweep::{self, Grid, IndexRange};
@@ -30,12 +28,11 @@ pub(crate) struct WalkForwardRun {
 pub(crate) fn execute(
     config: &RunConfig,
     wf: &WalkForwardConfig,
-    universe: &Universe,
+    grid: &Grid,
+    data: &sweep::Data<'_>,
     workers: &ResolvedWorkers,
 ) -> Result<WalkForwardRun> {
     let started = Instant::now();
-    let grid = Grid::build(config)?;
-    let data = sweep::Data::Full(universe);
     let grid_warmup = grid.max_warmup_bars();
     if wf.warmup_bars < grid_warmup {
         return Err(ConfigError::Invalid {
@@ -44,8 +41,9 @@ pub(crate) fn execute(
         }
         .into());
     }
-    let plan = plan_windows(universe.len(), wf)?;
+    let plan = plan_windows(data.len(), wf)?;
     let gaps = plan_gaps(&plan.windows);
+    let timeline = data.timeline();
     let pool = sweep::build_pool(workers.threads)?;
     let mut skipped = plan.skipped.clone();
     let mut windows = Vec::new();
@@ -62,7 +60,7 @@ pub(crate) fn execute(
             window.train_start,
             window.train_end,
         );
-        let mut tasks = sweep::run_grid(&pool, &grid, &data, train_range, wf.objective)?;
+        let mut tasks = sweep::run_grid(&pool, grid, data, train_range, wf.objective)?;
         sweep::sort_tasks(&mut tasks);
         let Some(best) = tasks
             .iter()
@@ -86,9 +84,7 @@ pub(crate) fn execute(
             window.test_end,
         );
         let combo_config = best_config(config, &best.params)?;
-        let mut strategy = build(&combo_config.strategy, universe.symbol_count());
-        let input = sweep::engine_input(&combo_config, workers.threads, test_range);
-        let test = run_backtest(universe, &input, strategy.as_mut())?;
+        let test = sweep::run_single(&combo_config, data, workers.threads, test_range)?;
         warnings.extend(test.warnings.iter().cloned());
         trades.extend(test.trades.iter().cloned());
         fills.extend(test.fills.iter().cloned());
@@ -103,10 +99,10 @@ pub(crate) fn execute(
             train_end: window.train_end,
             test_start: window.test_start,
             test_end: window.test_end,
-            train_start_ts: universe.timeline[window.train_start],
-            train_end_ts: universe.timeline[window.train_end - 1],
-            test_start_ts: universe.timeline[window.test_start],
-            test_end_ts: universe.timeline[window.test_end - 1],
+            train_start_ts: timeline[window.train_start],
+            train_end_ts: timeline[window.train_end - 1],
+            test_start_ts: timeline[window.test_start],
+            test_end_ts: timeline[window.test_end - 1],
             best_params: best.params.clone(),
             is_metrics: best.metrics.clone(),
             oos_metrics: test.metrics.clone(),
@@ -162,7 +158,7 @@ pub(crate) fn execute(
 
     let base = build_base_result(
         config,
-        universe,
+        data.data_hash(),
         &result,
         workers.threads,
         StitchedOutputs {
@@ -229,7 +225,7 @@ struct StitchedOutputs {
 
 fn build_base_result(
     config: &RunConfig,
-    universe: &Universe,
+    data_hash: &str,
     result: &WalkForwardResult,
     threads: usize,
     outputs: StitchedOutputs,
@@ -263,7 +259,7 @@ fn build_base_result(
         last_bar_ts: result.oos_equity.last().map(|point| point.ts),
         timeframe: config.timeframe.to_string(),
         config_hash: config.config_hash.clone(),
-        data_hash: universe.data_hash.clone(),
+        data_hash: data_hash.to_string(),
         threads,
         walk_forward_window: None,
         engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -349,7 +345,7 @@ periods_per_year = 365
         (dir, config_path)
     }
 
-    fn run(path: &Path) -> WalkForwardRun {
+    fn run(path: &Path, chunk_bars: Option<usize>) -> WalkForwardRun {
         let config = backtest_core::config::load_config(path).expect("config");
         let wf = config.walk_forward.clone().expect("walk_forward");
         let workers = ResolvedWorkers {
@@ -360,22 +356,41 @@ periods_per_year = 365
             worker_budget_bytes: 64 * 1024 * 1024,
             warnings: Vec::new(),
         };
-        let universe = backtest_data::load_universe(&backtest_data::LoadOptions {
+        let grid = Grid::build(&config).expect("grid");
+        let options = backtest_data::LoadOptions {
             source: backtest_data::LoadSource::from(&config.data),
             timeframe: config.timeframe,
             instruments: &config.instruments,
             start: config.start,
             end: config.end,
-        })
-        .expect("universe");
-        execute(&config, &wf, &universe, &workers).expect("walkforward")
+        };
+        let (universe, plan) = match chunk_bars {
+            Some(_) => {
+                let (plan, _) =
+                    backtest_data::plan_universe_reporting(&options).expect("data plan");
+                (None, Some(plan))
+            }
+            None => (
+                Some(backtest_data::load_universe(&options).expect("universe")),
+                None,
+            ),
+        };
+        let data = match (&universe, &plan) {
+            (Some(universe), _) => sweep::Data::Full(universe),
+            (_, Some(plan)) => sweep::Data::Stream {
+                plan,
+                chunk_bars: chunk_bars.expect("chunk size"),
+            },
+            _ => unreachable!("universe 与 plan 至少有一个"),
+        };
+        execute(&config, &wf, &grid, &data, &workers).expect("walkforward")
     }
 
     #[test]
     fn t5_9_t5_11_t5_12_windows_stitch_and_hash_are_stable() {
         let (_dir, path) = fixture_config();
-        let first = run(&path);
-        let second = run(&path);
+        let first = run(&path, None);
+        let second = run(&path, None);
         let result = &first.result;
 
         assert_eq!(result.windows.len(), 3);
@@ -419,5 +434,27 @@ periods_per_year = 365
             second.result.windows[0].best_params
         );
         assert_eq!(result.oos_equity.len(), second.result.oos_equity.len());
+    }
+
+    #[test]
+    fn chunked_walkforward_matches_full_load() {
+        let (_dir, path) = fixture_config();
+        let full = run(&path, None);
+        let chunked = run(&path, Some(50));
+
+        assert_eq!(
+            backtest_report::content_hash(&full.base).expect("full hash"),
+            backtest_report::content_hash(&chunked.base).expect("chunked hash")
+        );
+        assert_eq!(full.base.meta.data_hash, chunked.base.meta.data_hash);
+
+        let mut full_result = full.result;
+        let mut chunk_result = chunked.result;
+        full_result.elapsed_ms = 0;
+        chunk_result.elapsed_ms = 0;
+        assert_eq!(
+            serde_json::to_value(&full_result).expect("full json"),
+            serde_json::to_value(&chunk_result).expect("chunk json")
+        );
     }
 }

@@ -437,3 +437,62 @@ fn chunked_run_and_sweep_match_full_load() {
         chunk["results"][0]["result_hash"]
     );
 }
+
+#[test]
+fn chunked_walkforward_matches_full_load() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = fixture("fixtures/s5_daily.csv");
+    let base = walkforward_config(
+        &data,
+        &dir.path().join("out"),
+        "mode = \"rolling\"\ntrain_bars = 180\ntest_bars = 60\nstep_bars = 60\n\
+         embargo_bars = 1\nwarmup_bars = 40\nobjective = \"sharpe\"",
+    );
+    let chunked = base.replace(
+        "memory_limit_gb = 0",
+        "memory_limit_gb = 0\nchunk_bars = 50",
+    );
+    let read_json = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read json"))
+            .expect("parse json")
+    };
+
+    let full_config = write_config(dir.path(), "walkforward-full.toml", &base);
+    let chunk_config = write_config(dir.path(), "walkforward-chunked.toml", &chunked);
+    let (full_out, chunk_out) = (dir.path().join("wf-full"), dir.path().join("wf-chunk"));
+    for (config, out) in [(&full_config, &full_out), (&chunk_config, &chunk_out)] {
+        let output = run(&[
+            "walkforward",
+            "--config",
+            config.to_str().expect("config path"),
+            "--threads",
+            "1",
+            "--out",
+            out.to_str().expect("out path"),
+        ]);
+        assert_exit(&output, 0);
+        if config == &chunk_config {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("分块每窗口"));
+        }
+    }
+
+    let full = read_json(&full_out.join("result.json"));
+    let chunk = read_json(&chunk_out.join("result.json"));
+    assert_eq!(full["result_hash"], chunk["result_hash"]);
+    assert_eq!(full["meta"]["data_hash"], chunk["meta"]["data_hash"]);
+    assert!(full["walk_forward"].is_object());
+    for key in [
+        "windows",
+        "oos_equity",
+        "oos_metrics",
+        "param_stability",
+        "skipped_windows",
+        "gaps",
+        "dsr",
+    ] {
+        assert_eq!(
+            full["walk_forward"][key], chunk["walk_forward"][key],
+            "walk_forward.{key} 不一致"
+        );
+    }
+}

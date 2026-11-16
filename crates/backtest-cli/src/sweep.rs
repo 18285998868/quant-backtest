@@ -10,7 +10,7 @@ use backtest_core::error::{ConfigError, Error, ReportError, Result};
 use backtest_core::metrics::{deflated_sharpe, equity_returns, period_sharpe};
 use backtest_core::model::{
     BacktestResult, DeflatedSharpe, DrawdownEpisode, EquityPoint, FillRecord, Metrics,
-    MonthlyReturn, TradeRecord, Universe,
+    MonthlyReturn, TradeRecord, Ts, Universe,
 };
 use backtest_core::system::{ResolvedWorkers, peak_rss_bytes};
 use backtest_data::DataPlan;
@@ -173,6 +173,13 @@ impl Data<'_> {
         match self {
             Self::Full(universe) => &universe.data_hash,
             Self::Stream { plan, .. } => &plan.data_hash,
+        }
+    }
+
+    pub fn timeline(&self) -> &[Ts] {
+        match self {
+            Self::Full(universe) => &universe.timeline,
+            Self::Stream { plan, .. } => &plan.timeline,
         }
     }
 }

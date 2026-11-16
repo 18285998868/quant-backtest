@@ -319,9 +319,17 @@ fn cmd_walkforward(
     config.apply_overrides(threads, memory_limit_gb, out)?;
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
-    let universe = load(&config)?;
-    print_universe(&config, &universe, &workers);
-    let run = walkforward::execute(&config, &wf, &universe, &workers)?;
+    let grid = sweep::Grid::build(&config)?;
+    let loaded = prepare_data(&config, &workers, workers.threads, grid.max_warmup_bars())?;
+    print_data(&config, &loaded, &workers);
+    let data = match &loaded {
+        Loaded::Full(universe) => sweep::Data::Full(universe),
+        Loaded::Stream { plan, chunk_bars } => sweep::Data::Stream {
+            plan,
+            chunk_bars: *chunk_bars,
+        },
+    };
+    let run = walkforward::execute(&config, &wf, &grid, &data, &workers)?;
     let result = &run.result;
     println!(
         "窗口:{} 个,跳过 {} 个,目标 {}",
