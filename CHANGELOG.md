@@ -127,6 +127,7 @@
   自动分块路径由共享 `choose_chunk()` 单测覆盖。
 - 1m walk-forward 分块耗时约为整段的 19.5 倍(2.706 s 对 0.139 s),
   以时间换内存;43k bar 样本 RSS 由装载峰值主导,不用于证明内存收益。
-- 提交 `待补` 的干净克隆(与 `data-reader` 同级)通过
+- 提交 `1a47bb6` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(174 个)与 `cargo build --release --locked`;
-  夹具、1m 与 4 标的 1h 的整段/分块哈希与工作副本一致。
+  夹具、1m 与 4 标的 1h 的整段/分块 `result_hash`、`data_hash`、
+  窗口参数与 OOS 指标均与工作副本一致。

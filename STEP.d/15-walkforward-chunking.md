@@ -141,18 +141,29 @@ warmup 40;4×4 网格;`chunk_bars=50`。
 | --- | --- |
 | `cargo test --workspace --locked` | 174 个通过 |
 | `cargo fmt --all --check` | 通过 |
-| `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
-| `cargo nextest run --workspace --locked` | 待补 |
-| `cargo test --workspace --doc --locked` | 待补 |
-| `cargo doc --workspace --no-deps --locked` | 待补 |
-| `cargo deny check` | 待补 |
-| `cargo audit` | 待补 |
+| `cargo check --workspace --all-targets --locked` | 通过 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 通过 |
+| `cargo nextest run --workspace --locked` | 174 个通过 |
+| `cargo test --workspace --doc --locked` | 通过(0 个 doctest) |
+| `RUSTDOCFLAGS=-D warnings cargo doc` | 通过 |
+| `cargo deny check` | 通过 |
+| `cargo audit` | 131 个依赖,无漏洞报告 |
 | `cargo build --release --locked` | 通过 |
-| `scripts/check.sh --ci` | 待补 |
+| `scripts/check.sh --ci` | 通过 |
 
 ## 干净克隆
 
-待补。
+提交 `1a47bb6` 克隆到 `/data/qb-m5-clean`(与 `/data/data-reader` 同级),
+用于确认 path 依赖与分块 walk-forward 不依赖工作区残留:
+
+- `cargo test --workspace --locked`:174 个通过;
+- `cargo build --release --locked`:成功;
+- `fixtures/walkforward.toml`、BTCUSDT 1m、4 标的 1h 的整段/分块
+  `result_hash`、`data_hash`、窗口参数与 OOS 指标均与工作副本一致;
+- 夹具 `result_hash = 4f0e7bd6...`、1m `0fd37671...`、
+  4 标的 `9981eeaf...`,与工作副本相同。
+
+克隆目录保留在 `/data/qb-m5-clean`,可用于后续检查。
 
 ## 限制
 
