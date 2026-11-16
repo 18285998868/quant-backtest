@@ -106,3 +106,6 @@
   `41d11ac9...`/`4f0e7bd6...`、`7c680a05...`、`7c4c0da1...`。
 - 43k bar 样本的进程峰值 RSS 由二进制基线主导(单次约 64 MB 与 69–75 MB),
   数据内存估算分别为 2.0 MiB 与每窗口 195.3 KiB;超大样本内存收益待目标机实测。
+- 提交 `727f311` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(172 个)与 `cargo build --release --locked`;
+  1m 与 4 标的 1h 的整段/分块哈希、spot 冒烟 `efbb00b9...` 均与工作副本一致。

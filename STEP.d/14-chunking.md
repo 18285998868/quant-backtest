@@ -184,10 +184,17 @@ v2 上线后,旧 `data_hash`/`result_hash`/`sweep_hash` 全部失效并重录;
 
 ## 干净克隆
 
-提交后从最终提交克隆到与 `data-reader` 同级的新目录,运行
-`cargo test --workspace --locked`、`cargo build --release --locked`,
-并复跑 1m 与 4 标的 1h 的整段/分块配置;哈希与本文一致。结果补记在
-`CHANGELOG.md` 的 M4 验收条目。
+提交 `727f311` 克隆到与 `data-reader` 同级的 `/data/qb-m4-clean`:
+
+- `cargo test --workspace --locked`:172 个测试通过;
+- `cargo build --release --locked`:成功,path 依赖正确解析到 `/data/data-reader`;
+- `btc_1m_full` 与 `btc_1m_chunk`:`data_hash` 同为 `d9dc81d8...`、
+  `result_hash` 同为 `f648cd3e...`;
+- `multi_full` 与 `multi_chunk`:`data_hash` 同为 `da7521b2...`、
+  `result_hash` 同为 `54259a53...`;
+- `config/00.smoke.toml`:`result_hash = efbb00b9...`,与工作副本一致。
+
+克隆目录保留在 `/data/qb-m4-clean`,可用于后续检查。
 
 ## 限制
 
