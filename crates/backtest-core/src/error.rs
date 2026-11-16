@@ -107,6 +107,8 @@ pub enum DataError {
     UnknownSymbol { symbol: String },
     #[error("配置中的标的 '{symbol}' 没有数据")]
     MissingSymbolData { symbol: String },
+    #[error("标的 {symbol} 的资金费数据非法: {message}")]
+    Funding { symbol: String, message: String },
     #[error("标的 {symbol} 在区间 [{start}, {end}) 内没有数据")]
     EmptyRange {
         symbol: String,

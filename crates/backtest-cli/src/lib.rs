@@ -568,6 +568,7 @@ fn synthetic_universe(bars: usize, symbols: usize) -> Universe {
         timeframe: Timeframe::ONE_DAY,
         specs,
         series,
+        funding: Vec::new(),
         timeline: ts,
         data_hash: String::new(),
     }
@@ -688,6 +689,12 @@ fn print_result(result: &backtest_core::model::BacktestResult, paths: &ReportPat
         metrics.total_fees,
         result.fills.len()
     );
+    if let Some(funding) = &result.funding {
+        println!(
+            "资金费:净支出 {:.2},付出 {:.2},收到 {:.2},结算 {} 次",
+            funding.total_cost, funding.paid, funding.received, funding.events
+        );
+    }
     println!("产物:{}", paths.json.display());
     println!("产物:{}", paths.html.display());
     if !result.warnings.is_empty() {
@@ -822,6 +829,6 @@ periods_per_year = 365
         assert_eq!(a["result_hash"], b["result_hash"]);
         assert!(out_a.join("report.html").exists());
         assert!(out_b.join("report.html").exists());
-        assert_eq!(a["schema_version"], "1.1");
+        assert_eq!(a["schema_version"], "1.2");
     }
 }

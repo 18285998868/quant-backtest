@@ -22,6 +22,7 @@ risk_free_rate = 0.0
 # kind = "binance"
 # root = "../data/binance"
 # market = "spot"       # spot / futures/um / futures/cm
+# funding = true        # 仅期货可设;省略时期货开启、spot 关闭
 
 # [source]
 # kind = "dukascopy"

@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "report_kind": "run",
   "result_hash": "0000000000000000000000000000000000000000000000000000000000000000",
   "meta": {
@@ -114,6 +114,7 @@
     "turnover": 0.5,
     "cost_drag": 0.001
   },
+  "funding": null,
   "sweep": null,
   "walk_forward": null,
   "assumptions": [

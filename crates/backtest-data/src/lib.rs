@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use backtest_core::config::{DataInput, SourceConfig};
 use backtest_core::error::{DataError, Result};
-use backtest_core::model::{BarSeries, InstrumentSpec, Timeframe, Ts, Universe};
+use backtest_core::model::{BarSeries, FundingSeries, InstrumentSpec, Timeframe, Ts, Universe};
 
 mod archive;
 
@@ -50,7 +50,7 @@ pub struct LoadDiagnostics {
     pub notes: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RawBar {
     pub symbol: String,
     pub ts: Ts,
@@ -75,11 +75,11 @@ pub fn load_universe_reporting(options: &LoadOptions<'_>) -> Result<(Universe, L
         };
         return Err(DataError::Empty { path }.into());
     }
-    let (bars, diagnostics) = match options.source {
-        LoadSource::Csv(path) => (read_csv(path)?, LoadDiagnostics::default()),
+    let (bars, funding, diagnostics) = match options.source {
+        LoadSource::Csv(path) => (read_csv(path)?, Vec::new(), LoadDiagnostics::default()),
         LoadSource::Archive(source) => archive::load(options, source)?,
     };
-    finalize(options, bars, diagnostics)
+    finalize(options, bars, funding, diagnostics)
 }
 
 fn read_csv(path: &Path) -> Result<Vec<RawBar>> {
@@ -149,6 +149,7 @@ fn read_csv(path: &Path) -> Result<Vec<RawBar>> {
 fn finalize(
     options: &LoadOptions<'_>,
     bars: Vec<RawBar>,
+    funding: Vec<FundingSeries>,
     diagnostics: LoadDiagnostics,
 ) -> Result<(Universe, LoadDiagnostics)> {
     if bars.is_empty() {
@@ -262,17 +263,88 @@ fn finalize(
         }
     }
 
-    let data_hash = compute_data_hash(&series, options.instruments);
+    let mut diagnostics = diagnostics;
+    let mut funding = funding;
+    if !funding.is_empty() {
+        validate_funding(&funding, options.instruments)?;
+        let first_open = timeline[0]
+            .checked_sub(options.timeframe.duration_ms())
+            .unwrap_or(i64::MIN);
+        let last_ts = timeline.last().copied().ok_or_else(|| DataError::Funding {
+            symbol: "-".into(),
+            message: "资金费区间过滤需要非空时间线".into(),
+        })?;
+        for series in &mut funding {
+            let mut kept_ts = Vec::with_capacity(series.ts.len());
+            let mut kept_rate = Vec::with_capacity(series.rate.len());
+            for (ts, rate) in series.ts.iter().zip(&series.rate) {
+                if *ts > first_open && *ts <= last_ts {
+                    kept_ts.push(*ts);
+                    kept_rate.push(*rate);
+                }
+            }
+            series.ts = kept_ts;
+            series.rate = kept_rate;
+        }
+        let rows = funding.iter().map(FundingSeries::len).sum::<usize>();
+        diagnostics
+            .notes
+            .push(format!("资金费: 区间内 {rows} 次结算"));
+    }
+    let data_hash = compute_data_hash(&series, options.instruments, &funding);
     Ok((
         Universe {
             timeframe: options.timeframe,
             specs: options.instruments.to_vec(),
             series,
+            funding,
             timeline,
             data_hash,
         },
         diagnostics,
     ))
+}
+
+fn validate_funding(funding: &[FundingSeries], instruments: &[InstrumentSpec]) -> Result<()> {
+    if funding.len() != instruments.len() {
+        return Err(DataError::Funding {
+            symbol: "-".into(),
+            message: format!(
+                "资金费序列数 {} 与标的数 {} 不一致",
+                funding.len(),
+                instruments.len()
+            ),
+        }
+        .into());
+    }
+    for (series, spec) in funding.iter().zip(instruments) {
+        if series.ts.len() != series.rate.len() {
+            return Err(DataError::Funding {
+                symbol: spec.symbol.clone(),
+                message: "时间与费率长度不一致".into(),
+            }
+            .into());
+        }
+        let mut previous = None;
+        for (ts, rate) in series.ts.iter().zip(&series.rate) {
+            if !rate.is_finite() {
+                return Err(DataError::Funding {
+                    symbol: spec.symbol.clone(),
+                    message: format!("ts={ts} 的费率 {rate} 不是有限值"),
+                }
+                .into());
+            }
+            if previous.is_some_and(|value| *ts <= value) {
+                return Err(DataError::Funding {
+                    symbol: spec.symbol.clone(),
+                    message: format!("ts={ts} 未严格递增"),
+                }
+                .into());
+            }
+            previous = Some(*ts);
+        }
+    }
+    Ok(())
 }
 
 struct Columns {
@@ -428,7 +500,11 @@ fn parse_ts(raw: &str) -> std::result::Result<Ts, String> {
     Err(format!("'{raw}' 不是 epoch 毫秒或 RFC3339"))
 }
 
-fn compute_data_hash(series: &[BarSeries], specs: &[InstrumentSpec]) -> String {
+fn compute_data_hash(
+    series: &[BarSeries],
+    specs: &[InstrumentSpec],
+    funding: &[FundingSeries],
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"quant-backtest/data/v1");
     hasher.update((series.len() as u64).to_le_bytes());
@@ -443,6 +519,19 @@ fn compute_data_hash(series: &[BarSeries], specs: &[InstrumentSpec]) -> String {
             hasher.update(item.low[index].to_le_bytes());
             hasher.update(item.close[index].to_le_bytes());
             hasher.update(item.volume[index].to_le_bytes());
+        }
+    }
+    if !funding.is_empty() {
+        hasher.update(b"quant-backtest/funding/v1");
+        hasher.update((funding.len() as u64).to_le_bytes());
+        for (item, spec) in funding.iter().zip(specs) {
+            hasher.update((spec.symbol.len() as u64).to_le_bytes());
+            hasher.update(spec.symbol.as_bytes());
+            hasher.update((item.ts.len() as u64).to_le_bytes());
+            for index in 0..item.ts.len() {
+                hasher.update(item.ts[index].to_le_bytes());
+                hasher.update(item.rate[index].to_le_bytes());
+            }
         }
     }
     let digest = hasher.finalize();
@@ -638,5 +727,76 @@ mod tests {
         })
         .expect_err("must fail");
         assert!(matches!(error, Error::Data(DataError::EmptyRange { .. })));
+    }
+
+    fn raw_bar(index: i64, symbol: &str) -> RawBar {
+        RawBar {
+            symbol: symbol.into(),
+            ts: BASE_TS + index * DAY,
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.0,
+            volume: 1_000.0,
+        }
+    }
+
+    fn funding_options<'a>(instruments: &'a [InstrumentSpec]) -> LoadOptions<'a> {
+        LoadOptions {
+            source: LoadSource::Csv(Path::new("unused.csv")),
+            timeframe: Timeframe::ONE_DAY,
+            instruments,
+            start: None,
+            end: None,
+        }
+    }
+
+    #[test]
+    fn funding_filters_to_bar_window_and_changes_hash() {
+        let specs = [spec("AAA")];
+        let bars = vec![raw_bar(0, "AAA"), raw_bar(1, "AAA")];
+        let options = funding_options(&specs);
+        let (without, _) = finalize(
+            &options,
+            bars.clone(),
+            Vec::new(),
+            LoadDiagnostics::default(),
+        )
+        .expect("finalize");
+
+        let funding = vec![FundingSeries {
+            symbol: 0,
+            ts: vec![BASE_TS - DAY, BASE_TS, BASE_TS + DAY, BASE_TS + 10 * DAY],
+            rate: vec![0.1, 0.2, 0.3, 0.4],
+        }];
+        let (with, diagnostics) =
+            finalize(&options, bars, funding, LoadDiagnostics::default()).expect("finalize");
+        assert_eq!(with.funding[0].ts, vec![BASE_TS, BASE_TS + DAY]);
+        assert_ne!(with.data_hash, without.data_hash);
+        assert!(diagnostics.notes.iter().any(|note| note.contains("资金费")));
+    }
+
+    #[test]
+    fn rejects_unsorted_or_non_finite_funding() {
+        let specs = [spec("AAA")];
+        let options = funding_options(&specs);
+        for (ts, rate) in [
+            (vec![BASE_TS + DAY, BASE_TS], vec![0.1, 0.2]),
+            (vec![BASE_TS], vec![f64::NAN]),
+        ] {
+            let funding = vec![FundingSeries {
+                symbol: 0,
+                ts,
+                rate,
+            }];
+            let error = finalize(
+                &options,
+                vec![raw_bar(0, "AAA"), raw_bar(1, "AAA")],
+                funding,
+                LoadDiagnostics::default(),
+            )
+            .expect_err("must fail");
+            assert!(matches!(error, Error::Data(DataError::Funding { .. })));
+        }
     }
 }

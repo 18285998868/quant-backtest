@@ -43,6 +43,11 @@
 - M2:归档时间戳统一转换为 bar 收盘时刻;日期窗口前移一个周期,避免跨日/跨周 bar 丢失;缺失文件只进入诊断。
 - M2:`backtest-data` 通过 path 依赖同级 `data-reader`,CSV 与归档共用时间线校验和 `data_hash`;CLI 打印 `数据源:` 摘要。
 - M2:新增 `STEP.d/12-archive-source.md`、`docs/changes/006-archive-source.md`;`deny.toml` 允许 Zlib。
+- M3:Binance `futures/um`/`futures/cm` 默认按归档 `fundingRate` 结算资金费;`spot`/Dukascopy 默认关闭,`source.funding` 可显式覆盖,现货误开在配置阶段报错。
+- M3:稀疏 `FundingSeries`;结算窗口 `(上一根 bar 收盘, 本根 bar 收盘]`,本根收盘价计名义价值,正费率多头支付;归档 `calc_time` 的亚秒偏移归一为整秒。
+- M3:`BacktestResult.funding`(未启用时 JSON 省略)、报告 schema 1.2、HTML 资金费成本与按标的明细、walk-forward 跨窗口合并。
+- M3:启用资金费时 `data_hash` 追加 `quant-backtest/funding/v1` 段;未启用时 spot/CSV 哈希不变,`config_hash` 不纳入开关。
+- M3:新增 `STEP.d/13-funding.md` 与 `docs/changes/007-funding.md`。
 
 ### 验收
 
@@ -68,6 +73,12 @@
 - M2 归档冒烟 1/2 线程与重复运行 `result_hash` 一致;`cargo audit` 扫描 131 个依赖无漏洞报告。
 - 提交 `22979ff` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked` 与 `cargo build --release --locked`。
+- 2026-11-16:M3 验收,159 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release 构建与 `scripts/check.sh --ci` 全部通过。
+- BTCUSDT UM 1h 2024-01:744 根 bar、93 次区间内结算、87 次扣费,
+  净支出 `-34.92654974212712`;独立复算差 `1.8e-13`,1/2 线程 `result_hash` 同为 `695e40ef...`。
+- 4 标的组合 179 次结算,`by_symbol` 成本与次数之和等于总账,
+  1/2 线程 `result_hash` 同为 `766b917f...`。
+- `funding = false` 结果无资金费字段且 `config_hash` 不变;spot 冒烟保持 `d771891d...`。
 - 2026-11-16:M1 验收,138 个测试、fmt、check、clippy、nextest、doctest、rustdoc、deny、audit、release build 与 `scripts/check.sh --ci` 全部通过。
 - 1h 冒烟 `result_hash` 为 `68707c00...`,年化因子 8760,2 笔交易;1w 冒烟 `result_hash` 为 `fee172be...`,年化因子 52。
 - 1h 扫描 `sweep_hash` 为 `359ad35d...`(4 组/3 有效/1 跳过),walk-forward `result_hash` 为 `ca243a95...`(2 窗口/2 跳过)。

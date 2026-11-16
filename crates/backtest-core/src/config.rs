@@ -389,6 +389,11 @@ impl BinanceMarket {
             Self::Cm => "futures/cm",
         }
     }
+
+    /// 期货市场才有资金费结算。
+    pub fn has_funding(self) -> bool {
+        matches!(self, Self::Um | Self::Cm)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -423,6 +428,8 @@ impl DukascopyPrice {
 pub struct BinanceSource {
     pub root: PathBuf,
     pub market: BinanceMarket,
+    /// 是否加载并结算资金费;期货市场默认开启。
+    pub funding: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -456,8 +463,9 @@ impl SourceConfig {
     pub fn describe(&self) -> String {
         match self {
             Self::Binance(source) => format!(
-                "binance {}: {}",
+                "binance {}{}: {}",
                 source.market.as_str(),
+                if source.funding { " +资金费" } else { "" },
                 source.root.display()
             ),
             Self::Dukascopy(source) => format!(
@@ -629,6 +637,9 @@ struct RawSource {
     market: Option<String>,
     #[serde(default)]
     price_type: Option<String>,
+    /// 仅 binance 期货可用;省略时期货开启、现货关闭。
+    #[serde(default)]
+    funding: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -995,6 +1006,14 @@ fn parse_source(raw: RawSource, timeframe: Timeframe) -> Result<SourceConfig> {
             let market = raw
                 .market
                 .ok_or_else(|| field("source.market", "binance 数据源必须指定 market"))?;
+            let market = BinanceMarket::parse(&market)?;
+            let funding = raw.funding.unwrap_or(market.has_funding());
+            if funding && !market.has_funding() {
+                return Err(field(
+                    "source.funding",
+                    "spot 市场没有资金费;如需运行请删除 source.funding 或设为 false",
+                ));
+            }
             ensure_source_timeframe(
                 "binance",
                 timeframe,
@@ -1003,12 +1022,16 @@ fn parse_source(raw: RawSource, timeframe: Timeframe) -> Result<SourceConfig> {
             )?;
             Ok(SourceConfig::Binance(BinanceSource {
                 root,
-                market: BinanceMarket::parse(&market)?,
+                market,
+                funding,
             }))
         }
         "dukascopy" => {
             if raw.market.is_some() {
                 return Err(field("source.market", "仅适用于 binance 数据源"));
+            }
+            if raw.funding == Some(true) {
+                return Err(field("source.funding", "仅适用于 binance 期货市场"));
             }
             let price_type = match raw.price_type {
                 Some(text) => DukascopyPrice::parse(&text)?,
@@ -1582,9 +1605,63 @@ market = "spot"
             DataInput::Archive(SourceConfig::Binance(source)) => {
                 assert_eq!(source.root, PathBuf::from("../data/binance"));
                 assert_eq!(source.market, BinanceMarket::Spot);
+                assert!(!source.funding, "spot 默认不结算资金费");
             }
             other => panic!("unexpected data input: {other:?}"),
         }
+    }
+
+    #[test]
+    fn futures_sources_enable_funding_by_default_with_opt_out() {
+        for market in ["futures/um", "futures/cm"] {
+            let text = source_text(
+                "1h",
+                &format!(
+                    "[source]\nkind = \"binance\"\nroot = \"archive\"\nmarket = \"{market}\"\n"
+                ),
+            );
+            let config = load_text(&text).expect("config");
+            match &config.data {
+                DataInput::Archive(SourceConfig::Binance(source)) => {
+                    assert!(source.funding, "{market} 默认结算资金费");
+                }
+                other => panic!("unexpected data input: {other:?}"),
+            }
+
+            let opt_out = source_text(
+                "1h",
+                &format!(
+                    "[source]\nkind = \"binance\"\nroot = \"archive\"\nmarket = \"{market}\"\nfunding = false\n"
+                ),
+            );
+            let config = load_text(&opt_out).expect("config");
+            match &config.data {
+                DataInput::Archive(SourceConfig::Binance(source)) => {
+                    assert!(!source.funding, "{market} 可显式关闭资金费");
+                }
+                other => panic!("unexpected data input: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_funding_for_spot_and_dukascopy() {
+        let spot = source_text(
+            "1h",
+            "[source]\nkind = \"binance\"\nroot = \"archive\"\nmarket = \"spot\"\nfunding = true\n",
+        );
+        assert!(matches!(
+            load_text(&spot).expect_err("must fail"),
+            Error::Config(ConfigError::Invalid { ref field, .. }) if field == "source.funding"
+        ));
+        let dukascopy = source_text(
+            "1h",
+            "[source]\nkind = \"dukascopy\"\nroot = \"archive\"\nfunding = true\n",
+        );
+        assert!(matches!(
+            load_text(&dukascopy).expect_err("must fail"),
+            Error::Config(ConfigError::Invalid { ref field, .. }) if field == "source.funding"
+        ));
     }
 
     #[test]

@@ -83,7 +83,9 @@ cargo run --release -- bench --scale
 ```
 
 直连 Binance/Dukascopy 归档时,把配置中的 `run.data` 换成顶层 `[source]`;
-验收证据见 [M2 归档数据源](./STEP.d/12-archive-source.md)。
+Binance 期货默认结算资金费,可用 `source.funding = false` 关闭。
+验收证据见 [M2 归档数据源](./STEP.d/12-archive-source.md) 与
+[M3 资金费](./STEP.d/13-funding.md)。
 
 ## 步骤
 
@@ -100,3 +102,4 @@ cargo run --release -- bench --scale
 - [10 S6 健壮性与交付验收](./STEP.d/10-s6-acceptance.md)
 - [11 M1 多周期验收](./STEP.d/11-m1-acceptance.md)
 - [12 M2 归档数据源验收](./STEP.d/12-archive-source.md)
+- [13 M3 资金费验收](./STEP.d/13-funding.md)

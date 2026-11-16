@@ -379,6 +379,7 @@ mod tests {
             timeframe: Timeframe::ONE_DAY,
             specs,
             series: bars,
+            funding: Vec::new(),
             timeline: ts,
             data_hash: String::new(),
         }

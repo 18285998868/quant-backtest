@@ -6,7 +6,8 @@ use crate::config::{ExecutionConfig, RiskConfig, Trigger};
 use crate::error::{ConfigError, ExecutionError, Result};
 use crate::metrics::{MetricInput, compute_metrics, drawdown_episodes, monthly_returns};
 use crate::model::{
-    BacktestResult, EquityPoint, FillReason, FillRecord, RunMeta, Side, TradeRecord, Ts, Universe,
+    BacktestResult, EquityPoint, FillReason, FillRecord, FundingSummary, RunMeta, Side,
+    SymbolFunding, TradeRecord, Ts, Universe,
 };
 use crate::strategy::{MarketContext, PositionView, Strategy, TargetPosition};
 
@@ -98,6 +99,12 @@ struct Engine<'a> {
     updates: Vec<Option<f64>>,
     position_views: Vec<PositionView>,
     risk_locked: Vec<bool>,
+    funding_cursor: Vec<usize>,
+    funding_paid: f64,
+    funding_received: f64,
+    funding_events: usize,
+    funding_by_symbol: Vec<f64>,
+    funding_events_by_symbol: Vec<usize>,
 }
 
 pub fn run_backtest(
@@ -170,6 +177,12 @@ pub fn run_backtest(
             })
             .collect(),
         risk_locked: vec![false; n],
+        funding_cursor: vec![0; n],
+        funding_paid: 0.0,
+        funding_received: 0.0,
+        funding_events: 0,
+        funding_by_symbol: vec![0.0; n],
+        funding_events_by_symbol: vec![0; n],
     };
     engine.run(strategy)
 }
@@ -210,6 +223,27 @@ impl Engine<'_> {
         });
         let drawdowns = drawdown_episodes(&self.equity, self.input.initial_cash, 5);
         let monthly = monthly_returns(&self.equity, self.input.initial_cash);
+        let funding = if self.universe.funding.is_empty() {
+            None
+        } else {
+            Some(FundingSummary {
+                total_cost: self.funding_paid - self.funding_received,
+                paid: self.funding_paid,
+                received: self.funding_received,
+                events: self.funding_events,
+                by_symbol: self
+                    .funding_events_by_symbol
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, events)| **events > 0)
+                    .map(|(symbol, events)| SymbolFunding {
+                        symbol: symbol as u32,
+                        cost: self.funding_by_symbol[symbol],
+                        events: *events,
+                    })
+                    .collect(),
+            })
+        };
         let meta = RunMeta {
             strategy: self.input.strategy_name.clone(),
             params: self.input.params.clone(),
@@ -240,6 +274,7 @@ impl Engine<'_> {
             metrics,
             drawdowns,
             monthly,
+            funding,
             warnings: self.warnings.clone(),
         })
     }
@@ -848,7 +883,57 @@ impl Engine<'_> {
         Some(trade)
     }
 
+    /// 把 `(上一根 bar 收盘, 本根 bar 收盘]` 内的资金费结算计入现金。
+    ///
+    /// 结算时刻落在 bar 内时按结算费率求和,持仓视为该 bar 内不变,名义价值
+    /// 用本根收盘价。周期不超过 8h 且无 bar 内风控退出时与逐次结算等价。
+    fn apply_funding(&mut self, index: usize) {
+        let universe = self.universe;
+        if universe.funding.is_empty() {
+            return;
+        }
+        let bar_ts = universe.timeline[index];
+        let duration = universe.timeframe.duration_ms();
+        let window_start = if index == self.start_index {
+            bar_ts.checked_sub(duration).unwrap_or(i64::MIN)
+        } else {
+            universe.timeline[index - 1]
+        };
+        for (symbol, series) in universe.funding.iter().enumerate() {
+            let cursor = &mut self.funding_cursor[symbol];
+            while *cursor < series.ts.len() && series.ts[*cursor] <= window_start {
+                *cursor += 1;
+            }
+            let mut rate = 0.0;
+            let mut count = 0usize;
+            while *cursor < series.ts.len() && series.ts[*cursor] <= bar_ts {
+                rate += series.rate[*cursor];
+                *cursor += 1;
+                count += 1;
+            }
+            if count == 0 {
+                continue;
+            }
+            let qty = self.positions[symbol].qty;
+            if qty == 0.0 {
+                continue;
+            }
+            let close = universe.series[symbol].close[index];
+            let payment = qty * close * universe.specs[symbol].multiplier * rate;
+            self.cash -= payment;
+            if payment > 0.0 {
+                self.funding_paid += payment;
+            } else {
+                self.funding_received -= payment;
+            }
+            self.funding_events += count;
+            self.funding_by_symbol[symbol] += payment;
+            self.funding_events_by_symbol[symbol] += count;
+        }
+    }
+
     fn mark_close(&mut self, index: usize, ts: Ts, record: bool) {
+        self.apply_funding(index);
         let mut equity = self.cash;
         let mut gross = 0.0;
         for (symbol, position) in self.positions.iter().enumerate() {
@@ -1170,7 +1255,7 @@ mod tests {
     use super::*;
     use crate::config::{RiskLeg, Trigger};
     use crate::error::{Error, ExecutionError};
-    use crate::model::{AssetClass, BarSeries, InstrumentSpec, Side, Timeframe};
+    use crate::model::{AssetClass, BarSeries, FundingSeries, InstrumentSpec, Side, Timeframe};
 
     const DAY: i64 = 86_400_000;
     const BASE_TS: i64 = 1_577_836_800_000;
@@ -1276,6 +1361,7 @@ mod tests {
                 close: bars.iter().map(|bar| bar.3).collect(),
                 volume: bars.iter().map(|bar| bar.4).collect(),
             }],
+            funding: Vec::new(),
             timeline: ts,
             data_hash: "test".into(),
         }
@@ -1314,6 +1400,7 @@ mod tests {
             timeframe: Timeframe::ONE_DAY,
             specs: vec![spec("AAA"), spec("BBB")],
             series: vec![make_series(0, first), make_series(1, second)],
+            funding: Vec::new(),
             timeline: ts,
             data_hash: "test".into(),
         }
@@ -1377,6 +1464,71 @@ mod tests {
         let mut universe = universe(opens, closes);
         universe.specs[0].fee_bps = fee_bps;
         universe
+    }
+
+    fn universe_with_funding(opens: &[f64], closes: &[f64], rates: &[(usize, f64)]) -> Universe {
+        let mut universe = universe(opens, closes);
+        let mut series = FundingSeries {
+            symbol: 0,
+            ts: Vec::new(),
+            rate: Vec::new(),
+        };
+        for (index, rate) in rates {
+            series.ts.push(universe.timeline[*index]);
+            series.rate.push(*rate);
+        }
+        universe.funding = vec![series];
+        universe
+    }
+
+    #[test]
+    fn funding_charges_long_and_credits_short() {
+        let opens = [100.0; 4];
+        let closes = [100.0; 4];
+
+        let universe = universe_with_funding(&opens, &closes, &[(1, 0.001), (2, 0.001)]);
+        let result = run_backtest(
+            &universe,
+            &input(),
+            &mut Scripted::new(&[(0, 0.5), (2, 0.0)]),
+        )
+        .expect("run");
+        let funding = result.funding.expect("funding summary");
+        assert!((funding.total_cost - 100.0).abs() < 1e-9);
+        assert!((funding.paid - 100.0).abs() < 1e-9);
+        assert!((funding.received - 0.0).abs() < 1e-9);
+        assert_eq!(funding.events, 2);
+        assert_eq!(funding.by_symbol.len(), 1);
+        assert!((result.equity.last().unwrap().cash - 99_900.0).abs() < 1e-9);
+
+        let universe = universe_with_funding(&opens, &closes, &[(1, 0.001), (2, 0.001)]);
+        let result = run_backtest(
+            &universe,
+            &input(),
+            &mut Scripted::new(&[(0, -0.5), (2, 0.0)]),
+        )
+        .expect("run");
+        let funding = result.funding.expect("funding summary");
+        assert!((funding.total_cost + 100.0).abs() < 1e-9);
+        assert!((funding.received - 100.0).abs() < 1e-9);
+        assert!((result.equity.last().unwrap().cash - 100_100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn funding_ignores_settlements_outside_bar_window() {
+        let opens = [100.0; 3];
+        let closes = [100.0; 3];
+        let mut universe = universe(&opens, &closes);
+        universe.funding = vec![FundingSeries {
+            symbol: 0,
+            ts: vec![BASE_TS - DAY, BASE_TS + 3 * DAY],
+            rate: vec![0.5, 0.5],
+        }];
+        let result =
+            run_backtest(&universe, &input(), &mut Scripted::new(&[(0, 0.5)])).expect("run");
+        let funding = result.funding.expect("funding summary");
+        assert_eq!(funding.events, 0);
+        assert!((funding.total_cost - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2046,6 +2198,7 @@ mod tests {
                 periods_per_year: Some(365),
             }],
             series: vec![BarSeries::default()],
+            funding: Vec::new(),
             timeline: Vec::new(),
             data_hash: "test".into(),
         };

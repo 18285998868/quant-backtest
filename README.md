@@ -2,7 +2,7 @@
 
 纯 Rust 的多周期、多标的、可做空策略回测引擎,支持直接读取 Binance/Dukascopy 归档,参数扫描与 walk-forward。
 
-- 当前阶段:M2 归档数据源
+- 当前阶段:M3 资金费与合约成本
 - 设计基线:[docs/03-流程设计.md](./docs/03-流程设计.md)
 - 执行路径:[STEP.md](./STEP.md)
 - 变更记录:[CHANGELOG.md](./CHANGELOG.md)
@@ -47,6 +47,10 @@ cargo run --release --locked -- walkforward --config fixtures/walkforward.toml
 直连归档时把 `run.data` 换成顶层 `[source]`(Binance/Dukascopy),配置与
 时间戳语义见 [流程设计 §3.1 与 §3.7](./docs/03-流程设计.md)。
 
+Binance `futures/um`/`futures/cm` 默认按归档资金费结算,结果与报告单列
+资金费成本;`spot` 与 Dukascopy 默认关闭。需要关闭期货资金费时设置
+`source.funding = false`;`spot` 或 Dukascopy 设 `funding = true` 会报配置错误。
+
 ## 测试与门禁
 
 ```bash
@@ -65,6 +69,7 @@ release 构建;`cargo audit` 需要访问 RustSec 公告库。
 - [S6 验收](./STEP.d/10-s6-acceptance.md)
 - [M1 多周期验收](./STEP.d/11-m1-acceptance.md)
 - [M2 归档数据源验收](./STEP.d/12-archive-source.md)
+- [M3 资金费验收](./STEP.d/13-funding.md)
 
 ## 许可
 

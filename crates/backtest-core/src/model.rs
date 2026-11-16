@@ -198,11 +198,34 @@ impl BarSeries {
     }
 }
 
+/// 单个标的的资金费结算序列。
+///
+/// `ts` 是结算时刻(UTC 毫秒),`rate` 是该次结算的费率。序列按 `ts` 严格
+/// 递增;费率带符号,正数表示多头向空头支付。
+#[derive(Clone, Debug, Default)]
+pub struct FundingSeries {
+    pub symbol: SymbolId,
+    pub ts: Vec<Ts>,
+    pub rate: Vec<f64>,
+}
+
+impl FundingSeries {
+    pub fn len(&self) -> usize {
+        self.ts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ts.is_empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Universe {
     pub timeframe: Timeframe,
     pub specs: Vec<InstrumentSpec>,
     pub series: Vec<BarSeries>,
+    /// 与 `series` 等长;未启用资金费时为空。
+    pub funding: Vec<FundingSeries>,
     pub timeline: Vec<Ts>,
     pub data_hash: String,
 }
@@ -224,7 +247,18 @@ impl Universe {
             .iter()
             .map(|item| item.len() as u64 * 5 * std::mem::size_of::<f64>() as u64)
             .sum::<u64>();
-        timeline + series
+        let funding = self
+            .funding
+            .iter()
+            .map(|item| {
+                item.len() as u64 * (std::mem::size_of::<Ts>() + std::mem::size_of::<f64>()) as u64
+            })
+            .sum::<u64>();
+        timeline + series + funding
+    }
+
+    pub fn has_funding(&self) -> bool {
+        self.funding.iter().any(|item| !item.is_empty())
     }
 
     pub fn bar(&self, symbol: SymbolId, index: usize) -> BarView {
@@ -422,6 +456,24 @@ pub struct RunMeta {
     pub warnings: Vec<String>,
 }
 
+/// 单个标的的资金费净额(正数表示净支出)。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SymbolFunding {
+    pub symbol: SymbolId,
+    pub cost: f64,
+    pub events: usize,
+}
+
+/// 资金费汇总。`total_cost` 为正表示账户净支出。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FundingSummary {
+    pub total_cost: f64,
+    pub paid: f64,
+    pub received: f64,
+    pub events: usize,
+    pub by_symbol: Vec<SymbolFunding>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BacktestResult {
     pub meta: RunMeta,
@@ -431,6 +483,9 @@ pub struct BacktestResult {
     pub metrics: Metrics,
     pub drawdowns: Vec<DrawdownEpisode>,
     pub monthly: Vec<MonthlyReturn>,
+    /// 未启用资金费时为 `None`,序列化时省略,保持旧结果哈希不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding: Option<FundingSummary>,
     pub warnings: Vec<String>,
 }
 
@@ -520,6 +575,7 @@ mod tests {
                     volume: vec![0.0; 3],
                 },
             ],
+            funding: Vec::new(),
             timeline: vec![0; 3],
             data_hash: String::new(),
         };

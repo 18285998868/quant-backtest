@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use backtest_core::error::{ReportError, Result};
 use backtest_core::model::{
-    BacktestResult, DeflatedSharpe, DrawdownEpisode, EquityPoint, FillReason, Metrics,
-    MonthlyReturn, Side, TradeRecord, Ts,
+    BacktestResult, DeflatedSharpe, DrawdownEpisode, EquityPoint, FillReason, FundingSummary,
+    Metrics, MonthlyReturn, Side, TradeRecord, Ts,
 };
 use backtest_core::walkforward::WalkForwardResult;
 use chrono::DateTime;
@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: &str = "1.1";
+const SCHEMA_VERSION: &str = "1.2";
 const MAX_EQUITY_POINTS: usize = 20_000;
 const MAX_TRADE_ROWS: usize = 500;
 const MAX_SWEEP_ROWS: usize = 100;
@@ -23,8 +23,9 @@ const ASSUMPTIONS: &[&str] = &[
     "bar 时间戳为 UTC,bar 区间为 [start, end),收盘价对应 end。",
     "策略在收盘读取信号,下一根可用 bar 开盘成交,不使用未来数据。",
     "手续费按成交名义的万分比加单笔固定费;滑点按单边万分比。",
-    "首版要求 cash >= 0,不做多头融资;空头保证金可用,不计融券费与资金费率。",
-    "不建模分红送转、隔夜利息、强平与保证金追缴。",
+    "要求 cash >= 0,不做多头融资;空头保证金可用,不计融券费与隔夜利息。",
+    "Binance 期货默认按归档资金费结算记录扣减现金(结算时刻对齐到整秒);未启用资金费或非期货数据源不计资金费。",
+    "不建模分红送转、强平与保证金追缴。",
     "一次回测只允许一种计价货币;跨资产类别在收益层另行合成。",
     "美股使用复权价,加密与外汇使用原始报价。",
     "缺少 bar 时单标的顺延到下一根可用 bar;多标的不做填补。",
@@ -171,6 +172,7 @@ struct ReportJson<'a> {
     monthly: &'a [MonthlyReturn],
     trades: &'a [TradeRecord],
     costs: Costs,
+    funding: Option<&'a FundingSummary>,
     sweep: Option<&'a SweepReport>,
     walk_forward: Option<&'a WalkForwardResult>,
     assumptions: &'static [&'static str],
@@ -222,6 +224,7 @@ pub fn write_json(result: &BacktestResult, extras: &ReportExtras, path: &Path) -
             turnover: result.metrics.turnover,
             cost_drag: result.metrics.cost_drag,
         },
+        funding: result.funding.as_ref(),
         sweep: extras.sweep.as_ref(),
         walk_forward: extras.walk_forward.as_ref(),
         assumptions: ASSUMPTIONS,
@@ -619,6 +622,15 @@ fn costs_section(html: &mut String, result: &BacktestResult, hash: &str) {
     metric_row(html, "成交笔数", result.fills.len().to_string());
     metric_row(html, "年化换手", num(result.metrics.turnover, 4));
     metric_row(html, "成本拖累", pct(result.metrics.cost_drag));
+    if let Some(funding) = &result.funding {
+        metric_row(html, "资金费净支出", money(funding.total_cost));
+        metric_row(
+            html,
+            "资金费付出/收到",
+            format!("{} / {}", money(funding.paid), money(funding.received)),
+        );
+        metric_row(html, "资金费结算次数", funding.events.to_string());
+    }
     metric_row(
         html,
         "配置哈希",
@@ -633,6 +645,28 @@ fn costs_section(html: &mut String, result: &BacktestResult, hash: &str) {
     metric_row(html, "线程数", meta.threads.to_string());
     metric_row(html, "引擎版本", escape_html(&meta.engine_version));
     html.push_str("</tbody></table></div>\n");
+    if let Some(funding) = &result.funding
+        && !funding.by_symbol.is_empty()
+    {
+        html.push_str(
+            "<div class=\"panel\"><h3>资金费明细</h3><table><thead><tr><th>标的</th><th>净支出</th><th>结算次数</th></tr></thead><tbody>\n",
+        );
+        for item in &funding.by_symbol {
+            let symbol = meta
+                .symbols
+                .get(item.symbol as usize)
+                .map(String::as_str)
+                .unwrap_or("—");
+            let _ = writeln!(
+                html,
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                escape_html(symbol),
+                money(item.cost),
+                item.events
+            );
+        }
+        html.push_str("</tbody></table></div>\n");
+    }
 }
 
 fn sensitivity_section(html: &mut String, sweep: Option<&SweepReport>) {
@@ -1430,6 +1464,7 @@ mod tests {
                 month: 1,
                 return_pct: 10.0,
             }],
+            funding: None,
             warnings: vec!["测试警告".into()],
         }
     }
@@ -1560,6 +1595,41 @@ mod tests {
         assert!(!html.contains("S1–S5 只实现日线"));
         assert!(html.contains("周期由配置声明"));
         assert!(html.contains("复合 bar 收益"));
+    }
+
+    #[test]
+    fn renders_funding_costs_and_keeps_hash_stable_without_funding() {
+        use backtest_core::model::SymbolFunding;
+
+        let base = sample_result();
+        let without = content_hash(&base).expect("hash");
+        let fresh = sample_result();
+        assert_eq!(without, content_hash(&fresh).expect("hash"));
+        let mut result = sample_result();
+        result.funding = Some(FundingSummary {
+            total_cost: 12.5,
+            paid: 20.0,
+            received: 7.5,
+            events: 3,
+            by_symbol: vec![SymbolFunding {
+                symbol: 0,
+                cost: 12.5,
+                events: 3,
+            }],
+        });
+        assert_ne!(without, content_hash(&result).expect("hash"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = write_report(&result, &empty_extras(), dir.path()).expect("report");
+        let html = std::fs::read_to_string(&paths.html).expect("read html");
+        assert!(html.contains("资金费净支出"));
+        assert!(html.contains("12.50"));
+        assert!(html.contains("资金费明细"));
+        assert!(html.contains("结算次数"));
+        let json = std::fs::read_to_string(&paths.json).expect("read json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(value["funding"]["total_cost"], 12.5);
+        validate_report_json(&value).expect("schema");
     }
 
     #[test]

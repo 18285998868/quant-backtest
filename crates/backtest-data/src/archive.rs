@@ -14,14 +14,14 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use backtest_core::config::{BinanceMarket, DukascopyPrice, SourceConfig};
 use backtest_core::error::{ConfigError, DataError, Error, Result};
-use backtest_core::model::{TimeUnit, Timeframe, Ts};
+use backtest_core::model::{FundingSeries, TimeUnit, Timeframe, Ts};
 
 use crate::{LoadDiagnostics, LoadOptions, RawBar, validate_ohlc};
 
 pub(crate) fn load(
     options: &LoadOptions<'_>,
     source: &SourceConfig,
-) -> Result<(Vec<RawBar>, LoadDiagnostics)> {
+) -> Result<(Vec<RawBar>, Vec<FundingSeries>, LoadDiagnostics)> {
     match source {
         SourceConfig::Binance(source) => load_binance(options, source),
         SourceConfig::Dukascopy(source) => load_dukascopy(options, source),
@@ -112,7 +112,7 @@ fn binance_market(market: BinanceMarket) -> binance_core::Market {
 fn load_binance(
     options: &LoadOptions<'_>,
     source: &backtest_core::config::BinanceSource,
-) -> Result<(Vec<RawBar>, LoadDiagnostics)> {
+) -> Result<(Vec<RawBar>, Vec<FundingSeries>, LoadDiagnostics)> {
     // 配置入口已经校验过周期;这里的失败只代表内部映射遗漏。
     let interval = binance_interval(options.timeframe).ok_or_else(|| ConfigError::Unsupported {
         what: "数据源周期",
@@ -123,7 +123,8 @@ fn load_binance(
 
     let mut bars = Vec::new();
     let mut notes = Vec::new();
-    for spec in options.instruments {
+    let mut funding = Vec::new();
+    for (symbol_id, spec) in options.instruments.iter().enumerate() {
         let context = Context {
             provider: "binance",
             root: &source.root,
@@ -190,8 +191,76 @@ fn load_binance(
             report.rows_skipped,
             report.gaps
         ));
+        if source.funding {
+            funding.push(load_binance_funding(
+                source,
+                spec,
+                symbol_id as u32,
+                &context,
+                &window,
+                &mut notes,
+            )?);
+        }
     }
-    Ok((bars, LoadDiagnostics { notes }))
+    Ok((bars, funding, LoadDiagnostics { notes }))
+}
+
+fn load_binance_funding(
+    source: &backtest_core::config::BinanceSource,
+    spec: &backtest_core::model::InstrumentSpec,
+    symbol_id: u32,
+    context: &Context<'_>,
+    window: &DateWindow,
+    notes: &mut Vec<String>,
+) -> Result<FundingSeries> {
+    let mut builder = binance_core::Config::builder(
+        &source.root,
+        binance_core::Dataset::FundingRate,
+        &spec.symbol,
+    )
+    .market(binance_market(source.market));
+    if window.start.is_some() || window.end.is_some() {
+        builder = builder.date_range(window.start, window.end);
+    }
+    let config = builder
+        .build()
+        .map_err(|error| context.error(error.to_string()))?;
+    let data = binance_core::read(&config).map_err(|error| context.error(error.to_string()))?;
+    let table = &data.table;
+    let calc_time = i64_column(table, "calc_time", context)?;
+    let rate = f64_column(table, "last_funding_rate", context)?;
+    let mut series = FundingSeries {
+        symbol: symbol_id,
+        ts: Vec::with_capacity(table.len()),
+        rate: Vec::with_capacity(table.len()),
+    };
+    let mut adjusted = 0usize;
+    for index in 0..table.len() {
+        let ts = normalize_funding_ts(calc_time[index]);
+        if ts != calc_time[index] {
+            adjusted += 1;
+        }
+        series.ts.push(ts);
+        series.rate.push(rate[index]);
+    }
+    let report = &data.report;
+    notes.push(format!(
+        "binance {} {} 资金费: {} 次结算(monthly={}, 跳过={}, 缺口={}, 亚秒修正={})",
+        source.market.as_str(),
+        spec.symbol,
+        table.len(),
+        report.files_monthly,
+        report.rows_skipped,
+        report.gaps,
+        adjusted
+    ));
+    Ok(series)
+}
+
+/// 归档的 `calc_time` 偶尔比整点晚 1–2ms;结算语义是整点,向下取整到秒,
+/// 避免被分到下一根 bar 而错用下一根收盘价。
+fn normalize_funding_ts(ts: Ts) -> Ts {
+    ts - ts.rem_euclid(1_000)
 }
 
 fn i64_column<'a>(
@@ -233,7 +302,7 @@ fn dukascopy_price(price: DukascopyPrice) -> dukascopy_core::PriceType {
 fn load_dukascopy(
     options: &LoadOptions<'_>,
     source: &backtest_core::config::DukascopySource,
-) -> Result<(Vec<RawBar>, LoadDiagnostics)> {
+) -> Result<(Vec<RawBar>, Vec<FundingSeries>, LoadDiagnostics)> {
     let timeframe =
         dukascopy_timeframe(options.timeframe).ok_or_else(|| ConfigError::Unsupported {
             what: "数据源周期",
@@ -303,7 +372,7 @@ fn load_dukascopy(
             report.gaps().missing_bars()
         ));
     }
-    Ok((bars, LoadDiagnostics { notes }))
+    Ok((bars, Vec::new(), LoadDiagnostics { notes }))
 }
 
 #[cfg(test)]
@@ -314,6 +383,13 @@ mod tests {
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("date")
+    }
+
+    #[test]
+    fn normalizes_sub_second_funding_timestamps() {
+        assert_eq!(normalize_funding_ts(1_704_412_800_001), 1_704_412_800_000);
+        assert_eq!(normalize_funding_ts(1_704_412_800_000), 1_704_412_800_000);
+        assert_eq!(normalize_funding_ts(0), 0);
     }
 
     #[test]

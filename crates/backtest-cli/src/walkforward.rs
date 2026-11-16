@@ -10,7 +10,9 @@ use backtest_core::metrics::{
     MetricInput, compute_metrics, deflated_sharpe, drawdown_episodes, equity_returns,
     monthly_returns,
 };
-use backtest_core::model::{BacktestResult, FillRecord, RunMeta, TradeRecord, Universe};
+use backtest_core::model::{
+    BacktestResult, FillRecord, FundingSummary, RunMeta, SymbolFunding, TradeRecord, Universe,
+};
 use backtest_core::system::ResolvedWorkers;
 use backtest_core::walkforward::{
     WalkForwardResult, WalkForwardWindow, param_stability, plan_gaps, plan_windows, stitch_oos,
@@ -51,6 +53,7 @@ pub(crate) fn execute(
     let mut fills: Vec<FillRecord> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut trial_sharpe: Vec<f64> = Vec::new();
+    let mut funding: Option<FundingSummary> = None;
 
     for window in &plan.windows {
         let train_range = IndexRange::with_warmup(
@@ -88,6 +91,9 @@ pub(crate) fn execute(
         warnings.extend(test.warnings.iter().cloned());
         trades.extend(test.trades.iter().cloned());
         fills.extend(test.fills.iter().cloned());
+        if let Some(summary) = &test.funding {
+            merge_funding(&mut funding, summary);
+        }
         segments.push((test.equity.clone(), config.initial_cash));
 
         windows.push(WalkForwardWindow {
@@ -158,11 +164,47 @@ pub(crate) fn execute(
         universe,
         &result,
         workers.threads,
-        trades,
-        fills,
-        warnings,
+        StitchedOutputs {
+            trades,
+            fills,
+            warnings,
+            funding,
+        },
     );
     Ok(WalkForwardRun { base, result })
+}
+
+fn merge_funding(target: &mut Option<FundingSummary>, source: &FundingSummary) {
+    let summary = target.get_or_insert_with(|| FundingSummary {
+        total_cost: 0.0,
+        paid: 0.0,
+        received: 0.0,
+        events: 0,
+        by_symbol: Vec::new(),
+    });
+    summary.total_cost += source.total_cost;
+    summary.paid += source.paid;
+    summary.received += source.received;
+    summary.events += source.events;
+    for item in &source.by_symbol {
+        match summary
+            .by_symbol
+            .binary_search_by_key(&item.symbol, |entry| entry.symbol)
+        {
+            Ok(index) => {
+                summary.by_symbol[index].cost += item.cost;
+                summary.by_symbol[index].events += item.events;
+            }
+            Err(index) => summary.by_symbol.insert(
+                index,
+                SymbolFunding {
+                    symbol: item.symbol,
+                    cost: item.cost,
+                    events: item.events,
+                },
+            ),
+        }
+    }
 }
 
 fn best_config(
@@ -176,15 +218,27 @@ fn best_config(
     base.with_strategy(strategy)
 }
 
+/// 跨窗口拼接后的逐笔与汇总数据。
+struct StitchedOutputs {
+    trades: Vec<TradeRecord>,
+    fills: Vec<FillRecord>,
+    warnings: Vec<String>,
+    funding: Option<FundingSummary>,
+}
+
 fn build_base_result(
     config: &RunConfig,
     universe: &Universe,
     result: &WalkForwardResult,
     threads: usize,
-    trades: Vec<TradeRecord>,
-    fills: Vec<FillRecord>,
-    warnings: Vec<String>,
+    outputs: StitchedOutputs,
 ) -> BacktestResult {
+    let StitchedOutputs {
+        trades,
+        fills,
+        warnings,
+        funding,
+    } = outputs;
     let meta_params: BTreeMap<String, serde_json::Value> = result
         .param_stability
         .iter()
@@ -223,6 +277,7 @@ fn build_base_result(
         metrics: result.oos_metrics.clone(),
         drawdowns,
         monthly,
+        funding,
         warnings: all_warnings,
     }
 }
