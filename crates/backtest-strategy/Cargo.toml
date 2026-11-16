@@ -1,0 +1,13 @@
+[package]
+name = "backtest-strategy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "内置策略与策略工厂"
+
+[dependencies]
+backtest-core = { path = "../backtest-core", version = "0.1.0" }
+
+[lints]
+workspace = true

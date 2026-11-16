@@ -1,0 +1,20 @@
+[package]
+name = "backtest-report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "离线 JSON 与 HTML 报告"
+
+[dependencies]
+backtest-core = { path = "../backtest-core", version = "0.1.0" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "backtest-data"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "规范化日线 CSV 加载与校验"
+
+[dependencies]
+backtest-core = { path = "../backtest-core", version = "0.1.0" }
+chrono.workspace = true
+csv.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
