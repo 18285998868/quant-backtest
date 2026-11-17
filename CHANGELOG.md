@@ -67,6 +67,9 @@
 - M8:归档按标的并行装载;`RawBar` 去掉 `symbol` 字符串,`finalize()` 直接按标的分桶构造 `BarSeries`;`monthly_returns()` 改为单遍月边界推进。
 - M8:W1–W4 端到端耗时降 27%–42%,峰值 RSS 降 56%–73%,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/18-sweep-metrics-performance.md` 与 `docs/changes/012-sweep-metrics-performance.md`。
 - M8:曲线降采样(P6)未实施,本轮跳过;该改动会改变 `sweep_hash`,需 schema 1.3 与新的哈希基线,留待单独立项。
+- M8-B:`compute_metrics_with_period_sharpe()` 合并为单次权益遍历,同时累计收益、回撤、回撤段落、均价与暴露;样本标准差保留第二次等价遍历。
+- M8-B:删除 `series_drawdowns()` 与收益/回撤临时向量,单曲线约 20.6 MB 临时内存归零;新增新旧实现逐位对比测试。
+- M8-B:W2 中位耗时 4.38→3.67 s,W3 20.73→15.00 s,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/19-single-pass-metrics.md` 与 `docs/changes/013-single-pass-metrics.md`。
 
 ### 验收
 
@@ -190,3 +193,11 @@
 - 提交 `d89b111` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(184 个)与 `cargo build --release --locked`;
   冒烟、walk-forward、sweep、1m 与 4 标的 1h 哈希与工作副本一致。
+- 2026-11-17:M8-B 验收,185 个测试、fmt、clippy、release 构建与
+  `scripts/check.sh --ci` 全部通过。
+- W2/W3 对比 M8 二进制:中位耗时 4.38→3.67 s、20.73→15.00 s;
+  W2 峰值 729→661 MB,W3 峰值基本持平。
+- W2/W3 的 `sweep_hash` 仍为 `32f6ee94...`、`e19d0b73...`;历史哈希
+  `efbb00b9...`、`cd330ad9...`、`d84b7985...`、`7c680a05...`、
+  `7c4c0da1...`、`f7026895...`/`36ec7667...`、`7f823905...`/`376a13c5...`、
+  `4f0e7bd6...`、`41d11ac9...` 全部不变。

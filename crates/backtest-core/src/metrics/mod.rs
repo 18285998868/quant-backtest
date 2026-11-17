@@ -33,7 +33,6 @@ pub fn compute_metrics_with_period_sharpe(input: &MetricInput<'_>) -> (Metrics, 
     let last = &input.equity[n - 1];
     metrics.total_return = finite(last.equity / input.initial_cash - 1.0);
 
-    let returns = equity_returns(input.equity, input.initial_cash);
     let ppy = input.periods_per_year as f64;
     let rf_per_period = input.risk_free_rate / ppy;
 
@@ -45,42 +44,95 @@ pub fn compute_metrics_with_period_sharpe(input: &MetricInput<'_>) -> (Metrics, 
         metrics.cagr = finite((last.equity / input.initial_cash).powf(1.0 / years) - 1.0);
     }
 
+    // 单次权益扫描同时累计收益、回撤、回撤段落、均价与暴露。
+    // 累加顺序与逐项遍历一致,保证指标逐位不变。
+    let mut return_count = 0usize;
+    let mut return_sum = 0.0_f64;
+    let mut downside_sum = 0.0_f64;
+    let mut previous = input.initial_cash;
+    let mut peak = input.initial_cash;
+    let mut max_dd = 0.0_f64;
+    let mut drawdown_sq_sum = 0.0_f64;
+    let mut episode_peak = input.initial_cash;
+    let mut episode_peak_ts = first.ts;
+    let mut in_episode = false;
+    let mut max_duration = 0.0_f64;
+    let mut equity_sum = 0.0_f64;
+    let mut exposed = 0usize;
+
+    for point in input.equity {
+        if previous > 0.0 {
+            let r = point.equity / previous - 1.0;
+            return_count += 1;
+            return_sum += r;
+            let diff = (r - rf_per_period).min(0.0);
+            downside_sum += diff * diff;
+        }
+        previous = point.equity;
+
+        if point.equity > peak {
+            peak = point.equity;
+        }
+        let drawdown = if peak > 0.0 {
+            (point.equity / peak - 1.0).min(0.0)
+        } else {
+            0.0
+        };
+        if drawdown < max_dd {
+            max_dd = drawdown;
+        }
+        drawdown_sq_sum += drawdown * drawdown;
+
+        if point.equity >= episode_peak {
+            if in_episode {
+                max_duration = max_duration.max(days_between(episode_peak_ts, point.ts));
+                in_episode = false;
+            }
+            episode_peak = point.equity;
+            episode_peak_ts = point.ts;
+        } else {
+            in_episode = true;
+        }
+
+        equity_sum += point.equity;
+        if point.gross_exposure > 0.0 {
+            exposed += 1;
+        }
+    }
+    if in_episode {
+        max_duration = max_duration.max(days_between(episode_peak_ts, last.ts));
+    }
+
     let mut period_sharpe = None;
-    if returns.len() >= 2 {
-        let mean = mean(&returns);
-        let std = sample_std(&returns, mean);
+    if return_count >= 2 {
+        let mean = return_sum / return_count as f64;
+        // 样本标准差仍需均值,用第二次等价扫描避免为每个组合分配收益向量。
+        let mut previous = input.initial_cash;
+        let mut variance_sum = 0.0_f64;
+        for point in input.equity {
+            if previous > 0.0 {
+                let r = point.equity / previous - 1.0;
+                let delta = r - mean;
+                variance_sum += delta * delta;
+            }
+            previous = point.equity;
+        }
+        let std = (variance_sum / (return_count - 1) as f64).sqrt();
         if std > 0.0 {
             metrics.annual_volatility = finite(std * ppy.sqrt());
             metrics.sharpe = finite((mean - rf_per_period) / std * ppy.sqrt());
             period_sharpe = finite(mean / std);
         }
-        let downside: f64 = returns
-            .iter()
-            .map(|r| {
-                let diff = (r - rf_per_period).min(0.0);
-                diff * diff
-            })
-            .sum::<f64>()
-            / returns.len() as f64;
+        let downside = downside_sum / return_count as f64;
         let downside_dev = downside.sqrt();
         if downside_dev > 0.0 {
             metrics.sortino = finite((mean - rf_per_period) / downside_dev * ppy.sqrt());
         }
     }
 
-    let drawdowns = series_drawdowns(input.equity, input.initial_cash);
-    let max_dd = drawdowns.iter().fold(0.0_f64, |acc, dd| acc.min(*dd));
     metrics.max_drawdown = finite(if max_dd < 0.0 { -max_dd } else { 0.0 });
-    metrics.ulcer =
-        finite((drawdowns.iter().map(|dd| dd * dd).sum::<f64>() / drawdowns.len() as f64).sqrt());
-
-    let episodes = all_drawdown_episodes(input.equity, input.initial_cash);
-    metrics.max_drawdown_duration_days = finite(
-        episodes
-            .iter()
-            .map(|episode| episode.duration_days)
-            .fold(0.0_f64, f64::max),
-    );
+    metrics.ulcer = finite((drawdown_sq_sum / n as f64).sqrt());
+    metrics.max_drawdown_duration_days = finite(max_duration);
     if let Some(max_dd) = metrics.max_drawdown {
         if max_dd > 0.0 {
             if let Some(cagr) = metrics.cagr {
@@ -118,7 +170,7 @@ pub fn compute_metrics_with_period_sharpe(input: &MetricInput<'_>) -> (Metrics, 
     }
 
     metrics.total_fees = input.fills.iter().map(|fill| fill.fee).sum();
-    let avg_equity = input.equity.iter().map(|point| point.equity).sum::<f64>() / n as f64;
+    let avg_equity = equity_sum / n as f64;
     if avg_equity > 0.0
         && let Some(years) = years
         && years > 0.0
@@ -127,11 +179,6 @@ pub fn compute_metrics_with_period_sharpe(input: &MetricInput<'_>) -> (Metrics, 
         metrics.turnover = finite(traded / avg_equity / years);
         metrics.cost_drag = finite(metrics.total_fees / avg_equity / years);
     }
-    let exposed = input
-        .equity
-        .iter()
-        .filter(|point| point.gross_exposure > 0.0)
-        .count();
     metrics.exposure = finite(exposed as f64 / n as f64);
     (metrics, period_sharpe)
 }
@@ -286,22 +333,6 @@ fn month_end_start(year: i32, month: u32) -> Option<Ts> {
         .and_utc()
         .timestamp_millis()
         .into()
-}
-
-fn series_drawdowns(equity: &[EquityPoint], initial_cash: f64) -> Vec<f64> {
-    let mut peak = initial_cash;
-    let mut out = Vec::with_capacity(equity.len());
-    for point in equity {
-        if point.equity > peak {
-            peak = point.equity;
-        }
-        out.push(if peak > 0.0 {
-            (point.equity / peak - 1.0).min(0.0)
-        } else {
-            0.0
-        });
-    }
-    out
 }
 
 pub fn equity_returns(equity: &[EquityPoint], initial_cash: f64) -> Vec<f64> {
@@ -718,6 +749,302 @@ mod tests {
             / (returns.len() - 1) as f64;
         let expected = mean / variance.sqrt() * 252.0_f64.sqrt();
         assert!((metrics.sharpe.expect("sharpe") - expected).abs() < 1e-9);
+    }
+
+    fn legacy_series_drawdowns(equity: &[EquityPoint], initial_cash: f64) -> Vec<f64> {
+        let mut peak = initial_cash;
+        let mut out = Vec::with_capacity(equity.len());
+        for point in equity {
+            if point.equity > peak {
+                peak = point.equity;
+            }
+            out.push(if peak > 0.0 {
+                (point.equity / peak - 1.0).min(0.0)
+            } else {
+                0.0
+            });
+        }
+        out
+    }
+
+    fn legacy_metrics(input: &MetricInput<'_>) -> (Metrics, Option<f64>) {
+        let mut metrics = Metrics::empty(input.periods_per_year, input.risk_free_rate);
+        if input.equity.is_empty() || !input.initial_cash.is_finite() || input.initial_cash <= 0.0 {
+            return (metrics, None);
+        }
+        let n = input.equity.len();
+        let first = &input.equity[0];
+        let last = &input.equity[n - 1];
+        metrics.total_return = finite(last.equity / input.initial_cash - 1.0);
+
+        let returns = equity_returns(input.equity, input.initial_cash);
+        let ppy = input.periods_per_year as f64;
+        let rf_per_period = input.risk_free_rate / ppy;
+
+        let years = calendar_years(first.ts, last.ts);
+        if let Some(years) = years
+            && years > 0.0
+            && last.equity > 0.0
+        {
+            metrics.cagr = finite((last.equity / input.initial_cash).powf(1.0 / years) - 1.0);
+        }
+
+        let mut period_sharpe = None;
+        if returns.len() >= 2 {
+            let mean = mean(&returns);
+            let std = sample_std(&returns, mean);
+            if std > 0.0 {
+                metrics.annual_volatility = finite(std * ppy.sqrt());
+                metrics.sharpe = finite((mean - rf_per_period) / std * ppy.sqrt());
+                period_sharpe = finite(mean / std);
+            }
+            let downside: f64 = returns
+                .iter()
+                .map(|r| {
+                    let diff = (r - rf_per_period).min(0.0);
+                    diff * diff
+                })
+                .sum::<f64>()
+                / returns.len() as f64;
+            let downside_dev = downside.sqrt();
+            if downside_dev > 0.0 {
+                metrics.sortino = finite((mean - rf_per_period) / downside_dev * ppy.sqrt());
+            }
+        }
+
+        let drawdowns = legacy_series_drawdowns(input.equity, input.initial_cash);
+        let max_dd = drawdowns.iter().fold(0.0_f64, |acc, dd| acc.min(*dd));
+        metrics.max_drawdown = finite(if max_dd < 0.0 { -max_dd } else { 0.0 });
+        metrics.ulcer = finite(
+            (drawdowns.iter().map(|dd| dd * dd).sum::<f64>() / drawdowns.len() as f64).sqrt(),
+        );
+
+        let episodes = all_drawdown_episodes(input.equity, input.initial_cash);
+        metrics.max_drawdown_duration_days = finite(
+            episodes
+                .iter()
+                .map(|episode| episode.duration_days)
+                .fold(0.0_f64, f64::max),
+        );
+        if let Some(max_dd) = metrics.max_drawdown {
+            if max_dd > 0.0 {
+                if let Some(cagr) = metrics.cagr {
+                    metrics.calmar = finite(cagr / max_dd);
+                }
+            } else {
+                metrics.calmar = None;
+            }
+        }
+
+        let closed: Vec<&TradeRecord> = input
+            .trades
+            .iter()
+            .filter(|trade| trade.exit_ts.is_some())
+            .collect();
+        metrics.trades = closed.len();
+        if !closed.is_empty() {
+            let wins = closed.iter().filter(|trade| trade.pnl > 0.0).count();
+            metrics.win_rate = finite(wins as f64 / closed.len() as f64);
+            let gross_profit: f64 = closed
+                .iter()
+                .filter(|trade| trade.pnl > 0.0)
+                .map(|trade| trade.pnl)
+                .sum();
+            let gross_loss: f64 = closed
+                .iter()
+                .filter(|trade| trade.pnl < 0.0)
+                .map(|trade| trade.pnl)
+                .sum();
+            if gross_loss < 0.0 {
+                metrics.profit_factor = finite(gross_profit / gross_loss.abs());
+            }
+            metrics.expectancy =
+                finite(closed.iter().map(|trade| trade.pnl).sum::<f64>() / closed.len() as f64);
+        }
+
+        metrics.total_fees = input.fills.iter().map(|fill| fill.fee).sum();
+        let avg_equity = input.equity.iter().map(|point| point.equity).sum::<f64>() / n as f64;
+        if avg_equity > 0.0
+            && let Some(years) = years
+            && years > 0.0
+        {
+            let traded: f64 = input.fills.iter().map(|fill| fill.notional.abs()).sum();
+            metrics.turnover = finite(traded / avg_equity / years);
+            metrics.cost_drag = finite(metrics.total_fees / avg_equity / years);
+        }
+        let exposed = input
+            .equity
+            .iter()
+            .filter(|point| point.gross_exposure > 0.0)
+            .count();
+        metrics.exposure = finite(exposed as f64 / n as f64);
+        (metrics, period_sharpe)
+    }
+
+    fn assert_optional_bits(label: &str, left: Option<f64>, right: Option<f64>) {
+        match (left, right) {
+            (Some(left), Some(right)) => assert_eq!(
+                left.to_bits(),
+                right.to_bits(),
+                "{label}: {left} vs {right}"
+            ),
+            (None, None) => {}
+            _ => panic!("{label}: {left:?} vs {right:?}"),
+        }
+    }
+
+    fn assert_metrics_bits_equal(left: &Metrics, right: &Metrics) {
+        assert_optional_bits("total_return", left.total_return, right.total_return);
+        assert_optional_bits("cagr", left.cagr, right.cagr);
+        assert_optional_bits(
+            "annual_volatility",
+            left.annual_volatility,
+            right.annual_volatility,
+        );
+        assert_optional_bits("sharpe", left.sharpe, right.sharpe);
+        assert_optional_bits("sortino", left.sortino, right.sortino);
+        assert_optional_bits("max_drawdown", left.max_drawdown, right.max_drawdown);
+        assert_optional_bits(
+            "max_drawdown_duration_days",
+            left.max_drawdown_duration_days,
+            right.max_drawdown_duration_days,
+        );
+        assert_optional_bits("calmar", left.calmar, right.calmar);
+        assert_optional_bits("ulcer", left.ulcer, right.ulcer);
+        assert_eq!(left.trades, right.trades);
+        assert_optional_bits("win_rate", left.win_rate, right.win_rate);
+        assert_optional_bits("profit_factor", left.profit_factor, right.profit_factor);
+        assert_optional_bits("expectancy", left.expectancy, right.expectancy);
+        assert_eq!(left.total_fees.to_bits(), right.total_fees.to_bits());
+        assert_optional_bits("turnover", left.turnover, right.turnover);
+        assert_optional_bits("cost_drag", left.cost_drag, right.cost_drag);
+        assert_optional_bits("exposure", left.exposure, right.exposure);
+        assert_eq!(left.periods_per_year, right.periods_per_year);
+        assert_eq!(
+            left.risk_free_rate.to_bits(),
+            right.risk_free_rate.to_bits()
+        );
+    }
+
+    #[test]
+    fn fused_metrics_match_legacy_bits() {
+        let mut cases = vec![
+            Vec::new(),
+            points(&[100.0]),
+            points(&[100.0, 90.0, 95.0, 105.0]),
+            points(&[100.0, 100.0, 100.0, 100.0]),
+            points(&[100.0, 120.0, 120.0, 90.0, 90.0, 120.0]),
+            points(&[100.0, 50.0, 0.0, 70.0]),
+        ];
+        let start = NaiveDate::from_ymd_opt(2021, 1, 1)
+            .expect("date")
+            .and_hms_opt(0, 0, 0)
+            .expect("time")
+            .and_utc()
+            .timestamp_millis();
+        let mut curve = Vec::new();
+        let mut value = 100_000.0;
+        for day in 0..5_000 {
+            let wave = (day as f64 * 0.017).sin() * 0.012 + (day as f64 * 0.0031).cos() * 0.004;
+            value *= 1.0 + wave;
+            if day % 137 == 0 {
+                value = value.max(100_000.0);
+            }
+            curve.push(EquityPoint {
+                ts: start + day * 86_400_000,
+                equity: value,
+                cash: 0.0,
+                gross_exposure: if day % 3 == 0 { 1.0 } else { 0.0 },
+                drawdown: 0.0,
+            });
+        }
+        cases.push(curve);
+
+        let trades = vec![
+            TradeRecord {
+                symbol: 0,
+                side: crate::model::Side::Buy,
+                entry_ts: start,
+                exit_ts: Some(start + 86_400_000),
+                entry_price: 100.0,
+                exit_price: Some(101.0),
+                qty: 1.0,
+                pnl: 1.0,
+                fees: 0.01,
+                return_pct: 0.01,
+                bars_held: 1,
+                exit_reason: Some(crate::model::FillReason::TakeProfit),
+            },
+            TradeRecord {
+                symbol: 0,
+                side: crate::model::Side::Sell,
+                entry_ts: start + 2 * 86_400_000,
+                exit_ts: Some(start + 3 * 86_400_000),
+                entry_price: 100.0,
+                exit_price: Some(99.5),
+                qty: 1.0,
+                pnl: -0.5,
+                fees: 0.02,
+                return_pct: -0.005,
+                bars_held: 1,
+                exit_reason: Some(crate::model::FillReason::StopLoss),
+            },
+            TradeRecord {
+                symbol: 0,
+                side: crate::model::Side::Buy,
+                entry_ts: start + 4 * 86_400_000,
+                exit_ts: None,
+                entry_price: 100.0,
+                exit_price: None,
+                qty: 1.0,
+                pnl: 0.5,
+                fees: 0.01,
+                return_pct: 0.005,
+                bars_held: 0,
+                exit_reason: None,
+            },
+        ];
+        let fills = vec![
+            FillRecord {
+                ts: start,
+                symbol: 0,
+                side: crate::model::Side::Buy,
+                qty: 1.0,
+                price: 100.0,
+                notional: 100.0,
+                fee: 0.01,
+                slippage: 0.0,
+                reason: crate::model::FillReason::Entry,
+                ambiguous_bar: false,
+            },
+            FillRecord {
+                ts: start + 86_400_000,
+                symbol: 0,
+                side: crate::model::Side::Sell,
+                qty: 1.0,
+                price: 101.0,
+                notional: 101.0,
+                fee: 0.02,
+                slippage: 0.0,
+                reason: crate::model::FillReason::TakeProfit,
+                ambiguous_bar: false,
+            },
+        ];
+
+        for equity in &cases {
+            let input = MetricInput {
+                equity,
+                trades: &trades,
+                fills: &fills,
+                initial_cash: 100_000.0,
+                periods_per_year: 365,
+                risk_free_rate: 0.02,
+            };
+            let fused = compute_metrics_with_period_sharpe(&input);
+            let legacy = legacy_metrics(&input);
+            assert_metrics_bits_equal(&fused.0, &legacy.0);
+            assert_optional_bits("period_sharpe", fused.1, legacy.1);
+        }
     }
 
     #[test]
