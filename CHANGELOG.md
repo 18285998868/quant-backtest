@@ -206,3 +206,13 @@
 - 提交 `2b8f032` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(185 个)与 `cargo build --release --locked`;
   冒烟、sweep、walk-forward、1m 与 4 标的 1h 哈希与工作副本一致。
+- 2026-11-17:M9 验收,186 个测试、fmt、clippy、release 构建与
+  `scripts/check.sh --ci` 全部通过。
+- 合成基准对比 M8-B 二进制:64 标的 2.60 倍、256 标的 2.19 倍(空策略),
+  单标的空策略持平;W4 端到端中位耗时 14.38→13.34 s,峰值基本持平。
+- 历史哈希 `efbb00b9...`、`cd330ad9...`、`d84b7985...`、`7c680a05...`、
+  `7c4c0da1...`、`f7026895...`/`36ec7667...`、`7f823905...`/`376a13c5...`、
+  `4f0e7bd6...`、`41d11ac9...` 与 W4 的 `4a3f718e...` 全部不变。
+- 提交 `e03d2d8` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(186 个)与 `cargo build --release --locked`;
+  冒烟、sweep、walk-forward、1m 与 4 标的 1h 哈希与工作副本一致。
