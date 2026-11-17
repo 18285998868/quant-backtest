@@ -44,16 +44,16 @@ impl SmaCross {
 
     fn signal(&mut self, symbol: SymbolId, ctx: &MarketContext<'_>) -> Option<f64> {
         let state = self.states.get_mut(symbol as usize)?;
-        let bar = ctx.universe.try_bar(symbol, ctx.index)?;
-        state.fast_sum += bar.close;
-        state.fast_buf.push_back(bar.close);
+        let close = ctx.universe.try_close(symbol, ctx.index)?;
+        state.fast_sum += close;
+        state.fast_buf.push_back(close);
         if state.fast_buf.len() > self.fast
             && let Some(old) = state.fast_buf.pop_front()
         {
             state.fast_sum -= old;
         }
-        state.slow_sum += bar.close;
-        state.slow_buf.push_back(bar.close);
+        state.slow_sum += close;
+        state.slow_buf.push_back(close);
         if state.slow_buf.len() > self.slow
             && let Some(old) = state.slow_buf.pop_front()
         {
@@ -154,13 +154,13 @@ impl XsMomentum {
     }
 
     fn record(&mut self, symbol: usize, ctx: &MarketContext<'_>) {
-        let Some(bar) = ctx.universe.try_bar(symbol as SymbolId, ctx.index) else {
+        let Some(close) = ctx.universe.try_close(symbol as SymbolId, ctx.index) else {
             return;
         };
         let Some(history) = self.closes.get_mut(symbol) else {
             return;
         };
-        history.push_back(bar.close);
+        history.push_back(close);
         if history.len() > self.warmup + 1 {
             history.pop_front();
         }

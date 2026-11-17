@@ -70,6 +70,8 @@
 - M8-B:`compute_metrics_with_period_sharpe()` 合并为单次权益遍历,同时累计收益、回撤、回撤段落、均价与暴露;样本标准差保留第二次等价遍历。
 - M8-B:删除 `series_drawdowns()` 与收益/回撤临时向量,单曲线约 20.6 MB 临时内存归零;新增新旧实现逐位对比测试。
 - M8-B:W2 中位耗时 4.38→3.67 s,W3 20.73→15.00 s,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/19-single-pass-metrics.md` 与 `docs/changes/013-single-pass-metrics.md`。
+- M9:新增 `Universe::close()`/`try_close()`,`mark_close()`、`apply_funding()` 与内置策略改为只读收盘价列,不再为每根 bar 构造 `BarView`。
+- M9:合成基准 64 标的吞吐从约 191M 提升到约 496M bar步/秒(2.60 倍),256 标的 2.07–2.19 倍,单标的空策略持平;W4 端到端中位 14.38→13.34 s,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/20-multi-symbol-marking.md` 与 `docs/changes/014-multi-symbol-marking.md`。
 
 ### 验收
 

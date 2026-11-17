@@ -292,6 +292,18 @@ impl Universe {
         })
     }
 
+    /// 只读收盘价,语义等同 `bar(symbol, index).close`,但避免整根 bar 的拷贝。
+    pub fn close(&self, symbol: SymbolId, index: usize) -> f64 {
+        let local = index - self.base_index;
+        self.series[symbol as usize].close[local]
+    }
+
+    /// 只读收盘价的越界安全版本,语义等同 `try_bar(symbol, index)?.close`。
+    pub fn try_close(&self, symbol: SymbolId, index: usize) -> Option<f64> {
+        let local = index.checked_sub(self.base_index)?;
+        self.series.get(symbol as usize)?.close.get(local).copied()
+    }
+
     /// 当前窗口覆盖的绝对下标范围 `[start, end)`。
     pub fn window_start(&self) -> usize {
         self.base_index
@@ -562,6 +574,45 @@ mod tests {
             );
             assert_eq!(timeframe.bars_per_year(AssetClass::Fx), fx, "{raw}");
         }
+    }
+
+    #[test]
+    fn close_matches_bar_field_on_windowed_universe() {
+        let series: Vec<BarSeries> = (0..2)
+            .map(|symbol| BarSeries {
+                symbol,
+                ts: vec![10, 11, 12],
+                open: vec![1.0, 2.0, 3.0],
+                high: vec![1.5, 2.5, 3.5],
+                low: vec![0.5, 1.5, 2.5],
+                close: vec![100.0 + symbol as f64, 101.0, 102.0],
+                volume: vec![7.0, 8.0, 9.0],
+            })
+            .collect();
+        let universe = Universe {
+            timeframe: Timeframe::ONE_DAY,
+            specs: Vec::new(),
+            series,
+            funding: Vec::new(),
+            timeline: vec![10, 11, 12],
+            data_hash: String::new(),
+            base_index: 2,
+        };
+        for index in 2..5 {
+            for symbol in 0..2 {
+                assert_eq!(
+                    universe.close(symbol, index),
+                    universe.bar(symbol, index).close
+                );
+                assert_eq!(
+                    universe.try_close(symbol, index),
+                    universe.try_bar(symbol, index).map(|bar| bar.close)
+                );
+            }
+        }
+        assert_eq!(universe.try_close(0, 1), None);
+        assert_eq!(universe.try_close(0, 5), None);
+        assert_eq!(universe.try_close(9, 2), None);
     }
 
     #[test]

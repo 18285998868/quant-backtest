@@ -1208,7 +1208,7 @@ impl Engine<'_> {
             if qty == 0.0 {
                 continue;
             }
-            let close = universe.bar(symbol as u32, index).close;
+            let close = universe.close(symbol as u32, index);
             let payment = qty * close * universe.specs[symbol].multiplier * rate;
             self.cash -= payment;
             if payment > 0.0 {
@@ -1227,7 +1227,7 @@ impl Engine<'_> {
         let mut equity = self.cash;
         let mut gross = 0.0;
         for (symbol, position) in self.positions.iter().enumerate() {
-            let close = self.universe.bar(symbol as u32, index).close;
+            let close = self.universe.close(symbol as u32, index);
             let value = position.qty * close * self.universe.specs[symbol].multiplier;
             equity += value;
             gross += value.abs();
