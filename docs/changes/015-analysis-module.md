@@ -1,7 +1,7 @@
 # 015 统计分析模块设计草案
 
 日期:2026-11-17
-状态:M11-C、M11-A 与 M11-D 已实现并验收;M11-B/E 待推进
+状态:M11-C、M11-A、M11-D 与 M11-E 已实现并验收;M11-B 待推进
 上游:[需求规格](../01-需求规格.md)、[调研与决策](../02-调研与决策.md)、[流程设计](../03-流程设计.md)
 相关:[014 多标的收盘价标记](./014-multi-symbol-marking.md)
 
@@ -580,6 +580,15 @@ M11-D 验收(2026-11-17):
   与 1 线程/2 线程一致。
 - `[analysis].plateau_tolerance` 默认 0.10,必须为正有限数;非正数配置被拒绝。
 
+M11-E 验收(2026-11-17):
+
+- 143 个 core 测试、fmt、clippy、cargo doc 与 release 构建通过。
+- `sweep_summary.json` 与报告 JSON 写入 `trial_registry`,含 `grid_total`、
+  `grid_valid`、`skipped_invalid`、`oos_evaluated`、`analysis_trials` 与
+  `trial_hash`;`trial_hash` 为全部网格组合 `(params, config_hash)` 的规范
+  JSON SHA-256,与线程数无关。
+- `sweep_hash` 不吸收 `trial_registry`,历史哈希保持不变。
+
 PBO 的路径依赖夹具:
 
 - 用带止损的 SmaCross 生成收益,确认报告写出“CSCV 近似”告警。
@@ -643,7 +652,12 @@ M11-C 已于 2026-11-17 完成并验收;其余阶段未开始。
 - `crates/backtest-cli/src/sweep.rs` 的平台矩阵采集与 `analysis.plateau` 编排
 - `crates/backtest-report/src/lib.rs` 的 `plateau_block` 与 schema 校验
 
-未做:SPA、trial registry、`analyze` 子命令与收益矩阵持久化。
+代码位置(M11-E):
+
+- `crates/backtest-cli/src/sweep.rs` 的 `trial_registry` 编排与 `trial_hash`
+- `crates/backtest-report/src/lib.rs` 的 `TrialRegistry` 与 schema 校验
+
+未做:SPA、`analyze` 子命令与收益矩阵持久化。
 
 ## 13.1 实现记录(M11-A)
 

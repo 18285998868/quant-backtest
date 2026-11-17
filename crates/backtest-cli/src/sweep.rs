@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
+
 use backtest_core::analysis::{
     AnalysisReport, PlateauInput, SweepAnalysisInput, analyze_sweep, plateau_score,
 };
@@ -19,7 +21,7 @@ use backtest_core::system::{ResolvedWorkers, peak_rss_bytes};
 use backtest_data::DataPlan;
 use backtest_report::{
     CanonicalItem, CanonicalRef, CanonicalSlice, HeatmapCell, MarginalPoint, OosReport,
-    ParamMarginal, SweepCounts as ReportCounts, SweepHeatmap, SweepReport, SweepRow,
+    ParamMarginal, SweepCounts as ReportCounts, SweepHeatmap, SweepReport, SweepRow, TrialRegistry,
     canonical_hash,
 };
 use backtest_strategy::build;
@@ -55,6 +57,8 @@ pub(crate) struct SweepSummary {
     pub dsr: Option<DeflatedSharpe>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis: Option<AnalysisReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_registry: Option<TrialRegistry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -488,6 +492,8 @@ pub(crate) fn execute(
         .filter(|task| task.objective_value.is_some())
         .map(|task| task.index);
 
+    let analysis_trial_count = tasks.iter().filter(|task| task.daily_returns.is_some()).count();
+
     let mut analysis = if config.analysis.enabled {
         let mut labels = Vec::with_capacity(tasks.len());
         let mut rows = Vec::with_capacity(tasks.len());
@@ -647,6 +653,26 @@ pub(crate) fn execute(
         }
     }
 
+    let trial_payload = serde_json::to_vec(&grid.combos.iter().map(|combo| {
+        serde_json::json!({
+            "params": combo.params,
+            "config_hash": combo.config.config_hash,
+        })
+    }).collect::<Vec<_>>())
+    .unwrap_or_default();
+    let trial_hash = Sha256::digest(&trial_payload)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let trial_registry = TrialRegistry {
+        grid_total: grid.total,
+        grid_valid: grid.combos.len(),
+        skipped_invalid: grid.skipped_invalid,
+        oos_evaluated: sample_indices.len(),
+        analysis_trials: analysis_trial_count,
+        trial_hash,
+    };
+
     let counts = SweepCounts {
         total: grid.total,
         valid: grid.len(),
@@ -689,6 +715,7 @@ pub(crate) fn execute(
         oos: Some(oos.clone()),
         dsr: dsr.clone(),
         analysis: analysis.clone(),
+        trial_registry: Some(trial_registry.clone()),
     };
     summary.sweep_hash = summary_hash(&summary)?;
 
@@ -710,6 +737,7 @@ pub(crate) fn execute(
         sweep_hash: summary.sweep_hash.clone(),
         elapsed_ms: summary.meta.elapsed_ms,
         analysis: analysis.clone(),
+        trial_registry: Some(trial_registry.clone()),
     };
 
     let best_config = best_index.map(|index| &grid.combos[index].config);

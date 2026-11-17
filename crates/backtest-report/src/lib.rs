@@ -14,7 +14,7 @@ use backtest_core::model::{
 use backtest_core::walkforward::WalkForwardResult;
 use chrono::DateTime;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -79,6 +79,16 @@ pub struct SweepCounts {
     pub valid: usize,
     pub skipped_invalid: usize,
     pub warnings: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TrialRegistry {
+    pub grid_total: usize,
+    pub grid_valid: usize,
+    pub skipped_invalid: usize,
+    pub oos_evaluated: usize,
+    pub analysis_trials: usize,
+    pub trial_hash: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -150,6 +160,9 @@ pub struct SweepReport {
     /// 扫描层面的统计分析结果(PBO 等);未启用时为 `None`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis: Option<AnalysisReport>,
+    /// 试验登记;记录搜索次数与 `trial_hash`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_registry: Option<TrialRegistry>,
 }
 
 #[derive(Serialize)]
@@ -2365,6 +2378,7 @@ mod tests {
             sweep_hash: "abc".into(),
             elapsed_ms: 1,
             analysis: Some(sample_analysis()),
+            trial_registry: None,
         }
     }
 

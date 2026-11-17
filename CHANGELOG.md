@@ -255,3 +255,7 @@
 - M11-D:`sweep` 启用分析时,基于 heatmap 的二维网格计算平台结果并写入
   `analysis.plateau`;报告第 9 章新增“参数平台”子节。
 - M11-D:新增 `[analysis].plateau_tolerance`(正有限数);非正数配置被拒绝。
+- 2026-11-17:M11-E 验收,143 个 core 测试、fmt、clippy、cargo doc 与 release 构建通过。
+- M11-E:新增 `TrialRegistry`,记录 `grid_total`/`grid_valid`/`skipped_invalid`/
+  `oos_evaluated`/`analysis_trials` 与 `trial_hash`;写入 `sweep_summary.json`
+  与报告 JSON;`sweep_hash` 不吸收该字段。
