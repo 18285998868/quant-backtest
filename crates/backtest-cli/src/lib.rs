@@ -8,9 +8,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
+use backtest_core::analysis::{BootstrapStatistic, RunAnalysisInput, analyze_run};
 use backtest_core::config::{RunConfig, ThreadSetting, load_config};
 use backtest_core::engine::{EngineInput, run_backtest};
 use backtest_core::error::{Error, Result};
+use backtest_core::metrics::equity_returns;
 use backtest_core::model::{InstrumentSpec, Timeframe, Universe};
 use backtest_core::strategy::Strategy;
 use backtest_core::system::{
@@ -212,9 +214,23 @@ fn cmd_run(
             *chunk_bars,
         )?,
     };
-    let extras = ReportExtras::default();
+    let extras = if config.analysis.enabled {
+        let returns = equity_returns(&result.equity, config.initial_cash);
+        let analysis = analyze_run(&RunAnalysisInput {
+            returns: &returns,
+            periods_per_year: result.metrics.periods_per_year,
+            seed: config.analysis.seed,
+            bootstrap_samples: config.analysis.bootstrap_samples,
+        })?;
+        ReportExtras {
+            analysis: Some(analysis),
+            ..ReportExtras::default()
+        }
+    } else {
+        ReportExtras::default()
+    };
     let paths = write_report(&result, &extras, &config.output_dir)?;
-    print_result(&result, &paths);
+    print_result(&result, &extras, &paths);
     Ok(())
 }
 
@@ -233,6 +249,7 @@ fn cmd_sweep(
         .into());
     }
     config.apply_overrides(threads, memory_limit_gb, out)?;
+    warn_analysis_unsupported(&config, "sweep");
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
     let history = sweep::Grid::build(&config)?.max_warmup_bars();
@@ -286,7 +303,7 @@ fn cmd_sweep(
     println!("产物:{}", paths.json.display());
     let extras = ReportExtras {
         sweep: Some(run.report),
-        walk_forward: None,
+        ..ReportExtras::default()
     };
     let report_paths = write_report(&run.best_full, &extras, &config.output_dir)?;
     println!("产物:{}", report_paths.json.display());
@@ -317,6 +334,7 @@ fn cmd_walkforward(
                 message: "配置缺少 [walk_forward] 段".into(),
             })?;
     config.apply_overrides(threads, memory_limit_gb, out)?;
+    warn_analysis_unsupported(&config, "walkforward");
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
     let grid = sweep::Grid::build(&config)?;
@@ -353,8 +371,8 @@ fn cmd_walkforward(
         );
     }
     let extras = ReportExtras {
-        sweep: None,
         walk_forward: Some(run.result),
+        ..ReportExtras::default()
     };
     let paths = write_report(&run.base, &extras, &config.output_dir)?;
     println!("产物:{}", paths.json.display());
@@ -791,7 +809,19 @@ fn data_memory_warning(estimated: u64, limit: Option<u64>) -> Option<String> {
     ))
 }
 
-fn print_result(result: &backtest_core::model::BacktestResult, paths: &ReportPaths) {
+fn warn_analysis_unsupported(config: &RunConfig, command: &str) {
+    if config.analysis.enabled {
+        eprintln!(
+            "警告: analysis.enabled=true,但当前版本仅 run 支持 bootstrap;{command} 未执行分析"
+        );
+    }
+}
+
+fn print_result(
+    result: &backtest_core::model::BacktestResult,
+    extras: &ReportExtras,
+    paths: &ReportPaths,
+) {
     let metrics = &result.metrics;
     println!(
         "结果:总收益 {} CAGR {},最大回撤 {}",
@@ -811,6 +841,33 @@ fn print_result(result: &backtest_core::model::BacktestResult, paths: &ReportPat
             funding.total_cost, funding.paid, funding.received, funding.events
         );
     }
+    if let Some(analysis) = &extras.analysis {
+        if let Some(bootstrap) = &analysis.bootstrap {
+            let sharpe = bootstrap
+                .statistics
+                .iter()
+                .find(|stat| stat.name == BootstrapStatistic::Sharpe);
+            match sharpe {
+                Some(stat) => println!(
+                    "分析:bootstrap {} 次,块长 {},Sharpe {:.0}% 区间 [{}, {}]",
+                    bootstrap.samples,
+                    bootstrap.block_length,
+                    bootstrap.confidence * 100.0,
+                    format_num(stat.lower),
+                    format_num(stat.upper)
+                ),
+                None => println!(
+                    "分析:bootstrap {} 次,块长 {},没有 Sharpe 结果",
+                    bootstrap.samples, bootstrap.block_length
+                ),
+            }
+        } else {
+            println!("分析:已启用,但没有可用的 bootstrap 结果");
+        }
+        for warning in &analysis.warnings {
+            println!("分析警告: {warning}");
+        }
+    }
     println!("产物:{}", paths.json.display());
     println!("产物:{}", paths.html.display());
     if !result.warnings.is_empty() {
@@ -818,6 +875,12 @@ fn print_result(result: &backtest_core::model::BacktestResult, paths: &ReportPat
             println!("警告: {warning}");
         }
     }
+}
+
+fn format_num(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "—".into())
 }
 
 fn format_pct(value: Option<f64>) -> String {

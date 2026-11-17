@@ -2,6 +2,7 @@
 //!
 //! 数据加载见 `backtest-data`,内置策略见 `backtest-strategy`,报告见 `backtest-report`。
 
+pub mod analysis;
 pub mod config;
 pub mod engine;
 pub mod error;

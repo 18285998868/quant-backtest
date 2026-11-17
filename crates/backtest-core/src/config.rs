@@ -513,7 +513,27 @@ pub struct RunConfig {
     pub instruments: Vec<InstrumentSpec>,
     pub sweep: Option<SweepConfig>,
     pub walk_forward: Option<WalkForwardConfig>,
+    /// 统计分析与稳健性检验配置;关闭时不采集、不计算、不改变任何历史哈希。
+    pub analysis: AnalysisConfig,
     pub config_hash: String,
+}
+
+/// `[analysis]` 段。默认关闭。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalysisConfig {
+    pub enabled: bool,
+    pub seed: u64,
+    pub bootstrap_samples: usize,
+}
+
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            seed: default_analysis_seed(),
+            bootstrap_samples: default_bootstrap_samples(),
+        }
+    }
 }
 
 impl RunConfig {
@@ -606,6 +626,8 @@ struct RawConfig {
     sweep: Option<RawSweep>,
     #[serde(default)]
     walk_forward: Option<RawWalkForward>,
+    #[serde(default)]
+    analysis: Option<RawAnalysis>,
     #[serde(default)]
     instruments: Vec<RawInstrument>,
 }
@@ -739,6 +761,17 @@ struct RawWalkForward {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawAnalysis {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_analysis_seed")]
+    seed: u64,
+    #[serde(default = "default_bootstrap_samples")]
+    bootstrap_samples: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawInstrument {
     symbol: String,
     asset_class: String,
@@ -761,6 +794,14 @@ struct RawInstrument {
 
 fn default_output_dir() -> String {
     "out".into()
+}
+
+fn default_analysis_seed() -> u64 {
+    42
+}
+
+fn default_bootstrap_samples() -> usize {
+    1_000
 }
 
 fn one() -> f64 {
@@ -858,6 +899,7 @@ fn validate(mut raw: RawConfig) -> Result<RunConfig> {
     let strategy = parse_strategy(raw.strategy)?;
     let sweep = parse_sweep(raw.sweep, &strategy)?;
     let walk_forward = parse_walk_forward(raw.walk_forward, &strategy)?;
+    let analysis = parse_analysis(raw.analysis.take())?;
 
     if raw.instruments.is_empty() {
         return Err(field("instruments", "至少需要一个标的"));
@@ -975,6 +1017,7 @@ fn validate(mut raw: RawConfig) -> Result<RunConfig> {
         instruments,
         sweep,
         walk_forward,
+        analysis,
         config_hash,
     })
 }
@@ -1301,6 +1344,23 @@ fn parse_walk_forward(
     }))
 }
 
+fn parse_analysis(raw: Option<RawAnalysis>) -> Result<AnalysisConfig> {
+    let Some(raw) = raw else {
+        return Ok(AnalysisConfig::default());
+    };
+    if !(100..=100_000).contains(&raw.bootstrap_samples) {
+        return Err(field(
+            "analysis.bootstrap_samples",
+            "必须在 [100, 100000] 区间内",
+        ));
+    }
+    Ok(AnalysisConfig {
+        enabled: raw.enabled,
+        seed: raw.seed,
+        bootstrap_samples: raw.bootstrap_samples,
+    })
+}
+
 fn parse_risk_leg(raw: Option<RawRiskLeg>, field_name: &str) -> Result<Option<RiskLeg>> {
     let Some(raw) = raw else {
         return Ok(None);
@@ -1572,6 +1632,40 @@ allow_short = false
         let changed = config_text("1d", ONE_INSTRUMENT).replace("weight = 0.99", "weight = 0.98");
         let second = load_text(&changed).expect("second");
         assert_ne!(first.config_hash, second.config_hash);
+    }
+
+    #[test]
+    fn analysis_defaults_off_and_does_not_change_config_hash() {
+        let base_text = config_text("1d", ONE_INSTRUMENT);
+        let base = load_text(&base_text).expect("base");
+        assert_eq!(base.analysis, AnalysisConfig::default());
+        assert!(!base.analysis.enabled);
+
+        let with_section = base_text.replace(
+            "[strategy]",
+            "[analysis]\nenabled = false\nseed = 7\nbootstrap_samples = 200\n\n[strategy]",
+        );
+        let disabled = load_text(&with_section).expect("disabled");
+        assert_eq!(base.config_hash, disabled.config_hash);
+        assert_eq!(disabled.analysis.seed, 7);
+        assert_eq!(disabled.analysis.bootstrap_samples, 200);
+
+        let enabled =
+            load_text(&with_section.replace("enabled = false", "enabled = true")).expect("enabled");
+        assert!(enabled.analysis.enabled);
+        assert_eq!(enabled.config_hash, base.config_hash);
+    }
+
+    #[test]
+    fn rejects_invalid_analysis_bootstrap_samples() {
+        for samples in ["99", "100001"] {
+            let text = config_text("1d", ONE_INSTRUMENT).replace(
+                "[strategy]",
+                &format!("[analysis]\nenabled = true\nbootstrap_samples = {samples}\n\n[strategy]"),
+            );
+            let error = load_text(&text).expect_err("must fail");
+            assert!(matches!(error, Error::Config(ConfigError::Invalid { .. })));
+        }
     }
 
     #[test]

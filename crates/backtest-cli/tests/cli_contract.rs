@@ -361,6 +361,77 @@ fn result_hash_is_stable_across_threads() {
 }
 
 #[test]
+fn analysis_is_opt_in_and_keeps_base_result_hash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = fixture("fixtures/sma_6bars.csv");
+    let out_plain = dir.path().join("out-plain");
+    let out_analysis = dir.path().join("out-analysis");
+    let out_analysis_threads = dir.path().join("out-analysis-threads");
+    let base = base_config(&data, &dir.path().join("out"), "TEST");
+    let plain = write_config(dir.path(), "plain.toml", &base);
+    let with_analysis = base.replace(
+        "[strategy]",
+        "[analysis]\nenabled = true\nseed = 9\nbootstrap_samples = 100\n\n[strategy]",
+    );
+    let analysis = write_config(dir.path(), "analysis.toml", &with_analysis);
+
+    for (config, out) in [(&plain, &out_plain), (&analysis, &out_analysis)] {
+        let output = run(&[
+            "run",
+            "--config",
+            config.to_str().expect("config path"),
+            "--threads",
+            "1",
+            "--out",
+            out.to_str().expect("out path"),
+        ]);
+        assert_exit(&output, 0);
+    }
+    let output = run(&[
+        "run",
+        "--config",
+        analysis.to_str().expect("config path"),
+        "--threads",
+        "4",
+        "--out",
+        out_analysis_threads.to_str().expect("out path"),
+    ]);
+    assert_exit(&output, 0);
+
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(path.join("result.json")).expect("read result.json"),
+        )
+        .expect("parse result.json")
+    };
+    let plain = read(&out_plain);
+    let analysis = read(&out_analysis);
+    let analysis_threads = read(&out_analysis_threads);
+    assert_eq!(plain["schema_version"], "1.2");
+    assert!(plain.get("analysis").is_none());
+    assert_eq!(analysis["schema_version"], "1.3");
+    assert_eq!(plain["result_hash"], analysis["result_hash"]);
+    assert_eq!(analysis["result_hash"], analysis_threads["result_hash"]);
+    assert_eq!(
+        analysis["analysis"]["hash"],
+        analysis_threads["analysis"]["hash"]
+    );
+    assert_eq!(
+        analysis["analysis"]["hash"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(analysis["analysis"]["bootstrap"]["samples"], 100);
+    assert_eq!(
+        analysis["analysis"]["bootstrap"]["statistics"]
+            .as_array()
+            .map(Vec::len),
+        Some(5)
+    );
+    let html = std::fs::read_to_string(out_analysis.join("report.html")).expect("read html");
+    assert!(html.contains("Bootstrap 置信区间"));
+}
+
+#[test]
 fn chunked_run_and_sweep_match_full_load() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data = fixture("fixtures/sma_6bars.csv");

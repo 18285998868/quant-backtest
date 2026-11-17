@@ -14,6 +14,8 @@ pub enum Error {
     Execution(#[from] ExecutionError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    Analysis(#[from] AnalysisError),
     #[error("I/O 错误: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -24,9 +26,15 @@ impl Error {
             Error::Config(ConfigError::Io { .. } | ConfigError::ParseToml { .. }) => 2,
             Error::Config(_) => 2,
             Error::Data(_) => 3,
-            Error::Execution(_) | Error::Report(_) | Error::Io(_) => 1,
+            Error::Execution(_) | Error::Report(_) | Error::Analysis(_) | Error::Io(_) => 1,
         }
     }
+}
+
+#[derive(Debug, Error)]
+pub enum AnalysisError {
+    #[error("分析结果序列化失败: {0}")]
+    Serialize(String),
 }
 
 #[derive(Debug, Error)]

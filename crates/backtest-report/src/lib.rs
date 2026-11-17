@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::io::{BufWriter, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
+use backtest_core::analysis::{AnalysisReport, BootstrapStatistic};
 use backtest_core::error::{ReportError, Result};
 use backtest_core::model::{
     BacktestResult, DeflatedSharpe, DrawdownEpisode, EquityPoint, FillReason, FillRecord,
@@ -18,6 +19,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: &str = "1.2";
+const ANALYSIS_SCHEMA_VERSION: &str = "1.3";
 const MAX_EQUITY_POINTS: usize = 20_000;
 const MAX_TRADE_ROWS: usize = 500;
 const MAX_SWEEP_ROWS: usize = 100;
@@ -49,11 +51,14 @@ pub struct ReportPaths {
     pub html: PathBuf,
 }
 
-/// 报告附加信息。`run` 全为 `None`;`sweep` 与 `walkforward` 填对应段。
+/// 报告附加信息。`run` 通常全为 `None`;`sweep`、`walkforward` 与
+/// `[analysis]` 启用时填对应段。
 #[derive(Clone, Debug, Default)]
 pub struct ReportExtras {
     pub sweep: Option<SweepReport>,
     pub walk_forward: Option<WalkForwardResult>,
+    /// 统计分析与稳健性检验结果;`None` 表示未启用。
+    pub analysis: Option<AnalysisReport>,
 }
 
 impl ReportExtras {
@@ -177,6 +182,8 @@ struct ReportJson<'a> {
     funding: Option<&'a FundingSummary>,
     sweep: Option<&'a SweepReport>,
     walk_forward: Option<&'a WalkForwardResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    analysis: Option<&'a AnalysisReport>,
     assumptions: &'static [&'static str],
     warnings: &'a [String],
 }
@@ -218,7 +225,11 @@ fn write_json_with_hash(
         .map(|point| point.drawdown)
         .collect::<Vec<_>>();
     let payload = ReportJson {
-        schema_version: SCHEMA_VERSION,
+        schema_version: if extras.analysis.is_some() {
+            ANALYSIS_SCHEMA_VERSION
+        } else {
+            SCHEMA_VERSION
+        },
         report_kind: extras.kind(),
         result_hash: result_hash.to_string(),
         meta: &result.meta,
@@ -239,6 +250,7 @@ fn write_json_with_hash(
         funding: result.funding.as_ref(),
         sweep: extras.sweep.as_ref(),
         walk_forward: extras.walk_forward.as_ref(),
+        analysis: extras.analysis.as_ref(),
         assumptions: ASSUMPTIONS,
         warnings: &result.warnings,
     };
@@ -701,6 +713,7 @@ fn write_html_with_hash(
         &mut html,
         extras.sweep.as_ref(),
         extras.walk_forward.as_ref(),
+        extras.analysis.as_ref(),
     );
     assumptions_section(&mut html, &result.warnings);
 
@@ -1106,6 +1119,7 @@ fn robustness_section(
     html: &mut String,
     sweep: Option<&SweepReport>,
     walk_forward: Option<&WalkForwardResult>,
+    analysis: Option<&AnalysisReport>,
 ) {
     html.push_str("<h2>9. 样本外与稳健性</h2>\n");
     let mut any = false;
@@ -1124,8 +1138,92 @@ fn robustness_section(
         any = true;
         walk_forward_block(html, wf);
     }
+    if let Some(analysis) = analysis {
+        any = true;
+        bootstrap_block(html, analysis);
+    }
     if !any {
-        html.push_str("<div class=\"panel\"><p class=\"muted\">本次未运行样本外、DSR 或 walk-forward。</p></div>\n");
+        html.push_str("<div class=\"panel\"><p class=\"muted\">本次未运行样本外、DSR、walk-forward 或 bootstrap。</p></div>\n");
+    }
+}
+
+fn bootstrap_block(html: &mut String, analysis: &AnalysisReport) {
+    html.push_str("<div class=\"panel\"><h3>Bootstrap 置信区间</h3>\n");
+    let Some(report) = analysis.bootstrap.as_ref() else {
+        html.push_str("<p class=\"muted\">分析已启用,但没有可用的 bootstrap 结果。</p>\n");
+        if !analysis.warnings.is_empty() {
+            html.push_str("<ul>\n");
+            for warning in &analysis.warnings {
+                let _ = writeln!(html, "<li class=\"warn\">{}</li>", escape_html(warning));
+            }
+            html.push_str("</ul>\n");
+        }
+        html.push_str("</div>\n");
+        return;
+    };
+    let _ = writeln!(
+        html,
+        "<p class=\"muted\">stationary bootstrap · 重采样 {} 次 · 期望块长 {} · 置信度 {:.0}% · 种子 {}</p>",
+        report.samples,
+        report.block_length,
+        report.confidence * 100.0,
+        analysis.seed
+    );
+    if report.statistics.is_empty() {
+        html.push_str("<p class=\"muted\">没有可用的统计量。</p>\n");
+    } else {
+        html.push_str("<table><thead><tr><th>统计量</th><th class=\"num\">点估计</th><th class=\"num\">下限</th><th class=\"num\">上限</th><th class=\"num\">有效样本</th></tr></thead><tbody>\n");
+        for stat in &report.statistics {
+            let _ = writeln!(
+                html,
+                "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{}</td></tr>",
+                bootstrap_label(stat.name),
+                bootstrap_value(stat.name, stat.point),
+                bootstrap_value(stat.name, stat.lower),
+                bootstrap_value(stat.name, stat.upper),
+                stat.valid_samples,
+                report.samples
+            );
+        }
+        html.push_str("</tbody></table>\n");
+    }
+    if !analysis.warnings.is_empty() {
+        html.push_str("<ul>\n");
+        for warning in &analysis.warnings {
+            let _ = writeln!(html, "<li class=\"warn\">{}</li>", escape_html(warning));
+        }
+        html.push_str("</ul>\n");
+    }
+    let _ = writeln!(
+        html,
+        "<p class=\"note\">区间用百分位法,只描述单条收益序列的抽样波动,不修复参数搜索的选择偏差。分析哈希 <code>{}</code>。</p>",
+        escape_html(&analysis.hash)
+    );
+    html.push_str("</div>\n");
+}
+
+fn bootstrap_label(name: BootstrapStatistic) -> &'static str {
+    match name {
+        BootstrapStatistic::Mean => "均值(每期)",
+        BootstrapStatistic::Volatility => "波动率(每期)",
+        BootstrapStatistic::Sharpe => "Sharpe(年化)",
+        BootstrapStatistic::Cagr => "CAGR",
+        BootstrapStatistic::MaxDrawdown => "最大回撤",
+    }
+}
+
+fn bootstrap_value(name: BootstrapStatistic, value: Option<f64>) -> String {
+    let Some(value) = value else {
+        return "—".into();
+    };
+    match name {
+        BootstrapStatistic::Sharpe => num(Some(value), 3),
+        BootstrapStatistic::Mean | BootstrapStatistic::Volatility => {
+            format!("{:.4}%", value * 100.0)
+        }
+        BootstrapStatistic::Cagr | BootstrapStatistic::MaxDrawdown => {
+            format!("{:.2}%", value * 100.0)
+        }
     }
 }
 
@@ -1652,8 +1750,23 @@ pub fn validate_report_json(value: &serde_json::Value) -> std::result::Result<()
             return Err(format!("缺少字段 {key}"));
         }
     }
-    if object["schema_version"].as_str() != Some(SCHEMA_VERSION) {
-        return Err("schema_version 不匹配".into());
+    let schema = object["schema_version"]
+        .as_str()
+        .ok_or("schema_version 必须是字符串")?;
+    let analysis = object.get("analysis");
+    match schema {
+        SCHEMA_VERSION => {
+            if analysis.is_some_and(|value| !value.is_null()) {
+                return Err("schema 1.2 不允许 analysis 字段".into());
+            }
+        }
+        ANALYSIS_SCHEMA_VERSION => {
+            let analysis = analysis.ok_or("schema 1.3 缺少 analysis 字段")?;
+            if !analysis.is_null() {
+                validate_analysis_json(analysis)?;
+            }
+        }
+        other => return Err(format!("不支持的 schema_version: {other}")),
     }
     if object["result_hash"].as_str().map(str::len) != Some(64) {
         return Err("result_hash 必须是 64 位十六进制".into());
@@ -1719,9 +1832,96 @@ pub fn validate_report_json(value: &serde_json::Value) -> std::result::Result<()
     Ok(())
 }
 
+fn validate_analysis_json(value: &serde_json::Value) -> std::result::Result<(), String> {
+    let object = value.as_object().ok_or("analysis 必须是对象或 null")?;
+    for key in [
+        "version",
+        "hash",
+        "seed",
+        "input_hash",
+        "bootstrap",
+        "warnings",
+    ] {
+        if !object.contains_key(key) {
+            return Err(format!("analysis 缺少字段 {key}"));
+        }
+    }
+    if object["version"].as_u64() != Some(1) {
+        return Err("analysis.version 必须是 1".into());
+    }
+    for key in ["hash", "input_hash"] {
+        if object[key].as_str().map(str::len) != Some(64) {
+            return Err(format!("analysis.{key} 必须是 64 位十六进制"));
+        }
+    }
+    if object["seed"].as_u64().is_none() {
+        return Err("analysis.seed 必须是非负整数".into());
+    }
+    if !object["warnings"].is_array() {
+        return Err("analysis.warnings 必须是数组".into());
+    }
+    match object.get("bootstrap") {
+        None => return Err("analysis 缺少字段 bootstrap".into()),
+        Some(serde_json::Value::Null) => return Ok(()),
+        Some(serde_json::Value::Object(bootstrap)) => {
+            for key in ["samples", "block_length"] {
+                if bootstrap
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none()
+                {
+                    return Err(format!("analysis.bootstrap.{key} 必须是非负整数"));
+                }
+            }
+            if !bootstrap
+                .get("confidence")
+                .is_some_and(serde_json::Value::is_number)
+            {
+                return Err("analysis.bootstrap.confidence 必须是数值".into());
+            }
+            let statistics = bootstrap
+                .get("statistics")
+                .and_then(serde_json::Value::as_array)
+                .ok_or("analysis.bootstrap.statistics 必须是数组")?;
+            for stat in statistics {
+                let stat = stat
+                    .as_object()
+                    .ok_or("analysis.bootstrap.statistics 元素必须是对象")?;
+                if stat
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+                {
+                    return Err("analysis.bootstrap.statistics 缺少 name".into());
+                }
+                if stat
+                    .get("valid_samples")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none()
+                {
+                    return Err("analysis.bootstrap.statistics 缺少 valid_samples".into());
+                }
+                for key in ["point", "lower", "upper"] {
+                    match stat.get(key) {
+                        Some(serde_json::Value::Null) | Some(serde_json::Value::Number(_)) => {}
+                        _ => {
+                            return Err(format!(
+                                "analysis.bootstrap.statistics.{key} 必须是数值或 null"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Some(_) => return Err("analysis.bootstrap 必须是对象或 null".into()),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use backtest_core::analysis::BootstrapReport;
     use backtest_core::model::{
         DrawdownEpisode, EquityPoint, Metrics, MonthlyReturn, RunMeta, Side, TradeRecord,
     };
@@ -1814,6 +2014,87 @@ mod tests {
 
     fn empty_extras() -> ReportExtras {
         ReportExtras::default()
+    }
+
+    fn sample_analysis() -> AnalysisReport {
+        AnalysisReport {
+            version: 1,
+            hash: "a".repeat(64),
+            seed: 42,
+            input_hash: "b".repeat(64),
+            bootstrap: Some(BootstrapReport {
+                samples: 1_000,
+                block_length: 11,
+                confidence: 0.95,
+                statistics: vec![
+                    backtest_core::analysis::BootstrapStat {
+                        name: BootstrapStatistic::Mean,
+                        point: Some(0.0004),
+                        lower: Some(0.0001),
+                        upper: Some(0.0007),
+                        valid_samples: 1_000,
+                    },
+                    backtest_core::analysis::BootstrapStat {
+                        name: BootstrapStatistic::Sharpe,
+                        point: Some(1.25),
+                        lower: Some(0.4),
+                        upper: Some(2.1),
+                        valid_samples: 998,
+                    },
+                ],
+            }),
+            warnings: vec!["测试分析警告".into()],
+        }
+    }
+
+    #[test]
+    fn analysis_report_uses_schema_1_3_and_keeps_base_hash() {
+        let result = sample_result();
+        let base_hash = content_hash(&result).expect("hash");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plain_dir = dir.path().join("plain");
+        let plain_paths = write_report(&result, &empty_extras(), &plain_dir).expect("plain report");
+        let plain: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&plain_paths.json).expect("read plain json"),
+        )
+        .expect("parse plain json");
+        assert_eq!(plain["schema_version"], SCHEMA_VERSION);
+        assert!(plain.get("analysis").is_none());
+
+        let extras = ReportExtras {
+            analysis: Some(sample_analysis()),
+            ..ReportExtras::default()
+        };
+        let paths = write_report(&result, &extras, &dir.path().join("analysis")).expect("report");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.json).expect("read json"))
+                .expect("parse json");
+        assert_eq!(value["schema_version"], ANALYSIS_SCHEMA_VERSION);
+        assert_eq!(value["result_hash"], base_hash);
+        assert_eq!(value["analysis"]["hash"].as_str().map(str::len), Some(64));
+        assert_eq!(value["analysis"]["bootstrap"]["samples"], 1_000);
+        validate_report_json(&value).expect("schema");
+
+        let html = std::fs::read_to_string(&paths.html).expect("read html");
+        assert!(html.contains("Bootstrap 置信区间"));
+        assert!(html.contains("stationary bootstrap"));
+        assert!(html.contains("Sharpe(年化)"));
+        assert!(html.contains("测试分析警告"));
+    }
+
+    #[test]
+    fn analysis_schema_rejects_bad_hash() {
+        let mut extras = ReportExtras {
+            analysis: Some(sample_analysis()),
+            ..ReportExtras::default()
+        };
+        extras.analysis.as_mut().expect("analysis").hash = "short".into();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = write_report(&sample_result(), &extras, dir.path()).expect("report");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.json).expect("read json"))
+                .expect("parse json");
+        assert!(validate_report_json(&value).is_err());
     }
 
     fn sample_walk_forward() -> WalkForwardResult {
@@ -2059,6 +2340,7 @@ mod tests {
         let mut extras = ReportExtras {
             sweep: Some(sample_sweep()),
             walk_forward: Some(sample_walk_forward()),
+            ..ReportExtras::default()
         };
         let paths = write_report(&sample_result(), &extras, dir.path()).expect("report");
         let html = std::fs::read_to_string(&paths.html).expect("read html");
@@ -2096,8 +2378,8 @@ mod tests {
             ],
         }];
         let extras = ReportExtras {
-            sweep: None,
             walk_forward: Some(wf),
+            ..ReportExtras::default()
         };
         let paths = write_report(&sample_result(), &extras, dir.path()).expect("report");
         let html = std::fs::read_to_string(&paths.html).expect("read html");

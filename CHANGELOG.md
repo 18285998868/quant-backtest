@@ -72,6 +72,11 @@
 - M8-B:W2 中位耗时 4.38→3.67 s,W3 20.73→15.00 s,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/19-single-pass-metrics.md` 与 `docs/changes/013-single-pass-metrics.md`。
 - M9:新增 `Universe::close()`/`try_close()`,`mark_close()`、`apply_funding()` 与内置策略改为只读收盘价列,不再为每根 bar 构造 `BarView`。
 - M9:合成基准 64 标的吞吐从约 191M 提升到约 496M bar步/秒(2.60 倍),256 标的 2.07–2.19 倍,单标的空策略持平;W4 端到端中位 14.38→13.34 s,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/20-multi-symbol-marking.md` 与 `docs/changes/014-multi-symbol-marking.md`。
+- M11-C:新增 `backtest-core::analysis`,内置 SplitMix64、stationary bootstrap 与百分位置信区间,覆盖均值、波动率、Sharpe、CAGR 与最大回撤;每个重采样样本独立派生子种子,结果与线程数无关。
+- M11-C:新增 `[analysis]`(`enabled`、`seed`、`bootstrap_samples`),默认关闭;关闭时 `config_hash`、`result_hash` 与报告 schema 1.2 逐位不变。
+- M11-C:`run` 启用分析时报告升级为 schema 1.3,在第 9 章输出 bootstrap 子节,并写入独立的 `analysis_hash`;基础 `result_hash` 仍与关闭分析时一致。
+- M11-C:`sweep`/`walkforward` 遇到 `analysis.enabled = true` 会明确告警并跳过分析,PBO/SPA/plateau 留给后续阶段。
+- M11-C:新增 `docs/changes/015-analysis-module.md` 与 `crates/backtest-core/src/analysis/`。
 
 ### 验收
 
@@ -216,3 +221,14 @@
 - 提交 `e03d2d8` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(186 个)与 `cargo build --release --locked`;
   冒烟、sweep、walk-forward、1m 与 4 标的 1h 哈希与工作副本一致。
+- 2026-11-17:M11-C 验收,208 个测试、fmt、clippy、release 构建与
+  `scripts/check.sh --ci` 全部通过。
+- 分析冒烟(`fixtures/s5_daily.csv`,400 根 1d bar,bootstrap 500 次):
+  `schema_version` 1.3,`result_hash` 为
+  `56fef2bc99124558f23d23c3589c85fbe30eed9e8e4832b9f6ec9770e3c74500`,
+  `analysis_hash` 为
+  `c1218836b04437fc047de62670d340896798896abfeb7fa16072bd03d247e901`;
+  同一配置关闭 `[analysis]` 后仍为 schema 1.2 且 `result_hash` 逐位相同。
+- 分析冒烟 1 线程与 2 线程的 `analysis_hash` 一致;release 二进制连续两次
+  运行的 `result_hash` 与 `analysis_hash` 均一致;引擎 `config_hash`
+  `c36534db...` 与 M9 一致。
