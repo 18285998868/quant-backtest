@@ -17,8 +17,8 @@ pub use bootstrap::{
 };
 pub use pbo::{PboComputation, PboInput, PboReport, probability_of_backtest_overfitting};
 pub use plateau::{GridPoint, PlateauComputation, PlateauInput, PlateauReport, plateau_score};
-pub use spa::{SpaComputation, SpaInput, SpaReport, spa_test};
 pub use rng::{SplitMix64, seed_for};
+pub use spa::{SpaComputation, SpaInput, SpaReport, spa_test};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -93,11 +93,7 @@ pub fn spa_test(input: &SpaInput<'_>) -> Result<SpaComputation> {
     let mut best_t = f64::NEG_INFINITY;
     for (i, di) in d.iter().enumerate() {
         let mean = di.iter().sum::<f64>() / t_full as f64;
-        let var = di
-            .iter()
-            .map(|v| (v - mean) * (v - mean))
-            .sum::<f64>()
-            / (t_full as f64 - 1.0);
+        let var = di.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (t_full as f64 - 1.0);
         let sd = var.sqrt();
         if !sd.is_finite() || sd <= 0.0 {
             trial_t.push(None);
@@ -112,11 +108,7 @@ pub fn spa_test(input: &SpaInput<'_>) -> Result<SpaComputation> {
             best_index = Some(i);
         }
     }
-    let observed = if best_index.is_none() {
-        0.0
-    } else {
-        best_t
-    };
+    let observed = if best_index.is_none() { 0.0 } else { best_t };
     if best_index.is_none() {
         warnings.push("所有试验与基准无差异,SPA p 值为 1".into());
     }
@@ -139,37 +131,37 @@ pub fn spa_test(input: &SpaInput<'_>) -> Result<SpaComputation> {
     // bootstrap
     let mut count = 0usize;
     if best_index.is_some() {
-    for s in 0..input.samples {
-        let seed = seed_for(input.seed, "spa", s as u64);
-        let mut rng = SplitMix64::new(seed);
-        // generate stationary bootstrap indices length T
-        let mut indices = Vec::with_capacity(t_full);
-        let mut current = (rng.next_u64() as usize) % t_full;
-        for _ in 0..t_full {
-            indices.push(current);
-            if rng.next_f64() < 1.0 / l as f64 {
-                current = (rng.next_u64() as usize) % t_full;
-            } else {
-                current = (current + 1) % t_full;
+        for s in 0..input.samples {
+            let seed = seed_for(input.seed, "spa", s as u64);
+            let mut rng = SplitMix64::new(seed);
+            // generate stationary bootstrap indices length T
+            let mut indices = Vec::with_capacity(t_full);
+            let mut current = (rng.next_u64() as usize) % t_full;
+            for _ in 0..t_full {
+                indices.push(current);
+                if rng.next_f64() < 1.0 / l as f64 {
+                    current = (rng.next_u64() as usize) % t_full;
+                } else {
+                    current = (current + 1) % t_full;
+                }
+            }
+            // compute max bootstrap stat
+            let mut boot_best = f64::NEG_INFINITY;
+            for i in 0..d.len() {
+                if trial_sd[i] <= 0.0 {
+                    continue;
+                }
+                let mean_boot =
+                    indices.iter().map(|&idx| centered[i][idx]).sum::<f64>() / t_full as f64;
+                let t_boot = (t_full as f64).sqrt() * mean_boot / trial_sd[i];
+                if t_boot > boot_best {
+                    boot_best = t_boot;
+                }
+            }
+            if boot_best >= observed {
+                count += 1;
             }
         }
-        // compute max bootstrap stat
-        let mut boot_best = f64::NEG_INFINITY;
-        for i in 0..d.len() {
-            if trial_sd[i] <= 0.0 {
-                continue;
-            }
-            let mean_boot = indices.iter().map(|&idx| centered[i][idx]).sum::<f64>()
-                / t_full as f64;
-            let t_boot = (t_full as f64).sqrt() * mean_boot / trial_sd[i];
-            if t_boot > boot_best {
-                boot_best = t_boot;
-            }
-        }
-        if boot_best >= observed {
-            count += 1;
-        }
-    }
     }
 
     let p_value = if best_index.is_none() {

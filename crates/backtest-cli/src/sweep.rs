@@ -493,7 +493,10 @@ pub(crate) fn execute(
         .filter(|task| task.objective_value.is_some())
         .map(|task| task.index);
 
-    let analysis_trial_count = tasks.iter().filter(|task| task.daily_returns.is_some()).count();
+    let analysis_trial_count = tasks
+        .iter()
+        .filter(|task| task.daily_returns.is_some())
+        .count();
 
     let mut analysis = if config.analysis.enabled {
         let mut labels = Vec::with_capacity(tasks.len());
@@ -517,9 +520,16 @@ pub(crate) fn execute(
         if let Some(path) = &config.analysis.benchmark {
             match load_benchmark_returns(path) {
                 Ok(benchmark) => {
-                    let t = rows.iter().map(|r| r.len()).min().unwrap_or(0).min(benchmark.len());
+                    let t = rows
+                        .iter()
+                        .map(|r| r.len())
+                        .min()
+                        .unwrap_or(0)
+                        .min(benchmark.len());
                     if t < 2 {
-                        report.warnings.push("SPA 基准与试验收益长度不足,已跳过".into());
+                        report
+                            .warnings
+                            .push("SPA 基准与试验收益长度不足,已跳过".into());
                     } else {
                         let trimmed_rows: Vec<Vec<f64>> =
                             rows.iter().map(|r| r[..t].to_vec()).collect();
@@ -545,11 +555,15 @@ pub(crate) fn execute(
                     }
                 }
                 Err(error) => {
-                    report.warnings.push(format!("SPA 基准加载失败,已跳过: {error}"));
+                    report
+                        .warnings
+                        .push(format!("SPA 基准加载失败,已跳过: {error}"));
                 }
             }
         } else {
-            report.warnings.push("未提供 [analysis].benchmark,已跳过 SPA".into());
+            report
+                .warnings
+                .push("未提供 [analysis].benchmark,已跳过 SPA".into());
         }
 
         Some(report)
@@ -672,8 +686,10 @@ pub(crate) fn execute(
                                 && task.params.get(&heatmap.y_param) == Some(y)
                         })
                         .collect();
-                    let vals: Vec<f64> =
-                        matching.iter().filter_map(|task| task.objective_value).collect();
+                    let vals: Vec<f64> = matching
+                        .iter()
+                        .filter_map(|task| task.objective_value)
+                        .collect();
                     if !vals.is_empty() {
                         values[yi][xi] = Some(vals.iter().sum::<f64>() / vals.len() as f64);
                     }
@@ -691,16 +707,24 @@ pub(crate) fn execute(
                 }
             }
         } else {
-            analysis.warnings.push("平台分析需要至少两个参数轴,已跳过".into());
+            analysis
+                .warnings
+                .push("平台分析需要至少两个参数轴,已跳过".into());
         }
     }
 
-    let trial_payload = serde_json::to_vec(&grid.combos.iter().map(|combo| {
-        serde_json::json!({
-            "params": combo.params,
-            "config_hash": combo.config.config_hash,
-        })
-    }).collect::<Vec<_>>())
+    let trial_payload = serde_json::to_vec(
+        &grid
+            .combos
+            .iter()
+            .map(|combo| {
+                serde_json::json!({
+                    "params": combo.params,
+                    "config_hash": combo.config.config_hash,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
     .unwrap_or_default();
     let trial_hash = Sha256::digest(&trial_payload)
         .iter()
@@ -817,13 +841,11 @@ fn param_label(params: &BTreeMap<String, Value>) -> String {
         .join(",")
 }
 
-
 fn load_benchmark_returns(path: &str) -> Result<Vec<f64>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|error| ConfigError::Invalid {
-            field: "analysis.benchmark".into(),
-            message: format!("无法读取基准文件 {path}: {error}"),
-        })?;
+    let content = std::fs::read_to_string(path).map_err(|error| ConfigError::Invalid {
+        field: "analysis.benchmark".into(),
+        message: format!("无法读取基准文件 {path}: {error}"),
+    })?;
     let mut closes = Vec::new();
     for (line_no, line) in content.lines().enumerate() {
         let line = line.trim();

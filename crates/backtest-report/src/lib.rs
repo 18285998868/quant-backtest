@@ -1171,7 +1171,11 @@ fn robustness_section(
             any = true;
             spa_block(html, analysis);
         }
-        if analysis.bootstrap.is_none() && analysis.pbo.is_none() && analysis.plateau.is_none() && analysis.spa.is_none() {
+        if analysis.bootstrap.is_none()
+            && analysis.pbo.is_none()
+            && analysis.plateau.is_none()
+            && analysis.spa.is_none()
+        {
             any = true;
             html.push_str("<div class=\"panel\"><h3>统计分析</h3><p class=\"muted\">分析已启用,但没有可用的结果。</p>");
             if !analysis.warnings.is_empty() {
@@ -1342,7 +1346,9 @@ fn plateau_block(html: &mut String, analysis: &AnalysisReport) {
         let _ = writeln!(
             html,
             "<p>稳健点: x={}, y={}, 目标值 {}</p>",
-            robust.x, robust.y, num(Some(robust.value), 4)
+            robust.x,
+            robust.y,
+            num(Some(robust.value), 4)
         );
     } else {
         html.push_str("<p class=\"muted\">没有平台得分 >=0.75 的稳健点。</p>\n");
@@ -1378,7 +1384,10 @@ fn spa_block(html: &mut String, analysis: &AnalysisReport) {
         "<p><span class=\"num\">p = {:.4}</span> · 统计量 {:.3} · 最优试验 {}</p>",
         spa.p_value,
         spa.statistic,
-        spa.best_label.as_deref().map(escape_html).unwrap_or_else(|| "无".into())
+        spa.best_label
+            .as_deref()
+            .map(escape_html)
+            .unwrap_or_else(|| "无".into())
     );
     let _ = writeln!(
         html,
@@ -2115,8 +2124,14 @@ fn validate_analysis_json(value: &serde_json::Value) -> std::result::Result<(), 
                     Some(serde_json::Value::Null) if key == "robust" => {}
                     Some(serde_json::Value::Object(point)) => {
                         for field in ["x", "y"] {
-                            if point.get(field).and_then(serde_json::Value::as_u64).is_none() {
-                                return Err(format!("analysis.plateau.{key}.{field} 必须是非负整数"));
+                            if point
+                                .get(field)
+                                .and_then(serde_json::Value::as_u64)
+                                .is_none()
+                            {
+                                return Err(format!(
+                                    "analysis.plateau.{key}.{field} 必须是非负整数"
+                                ));
                             }
                         }
                         if !point.get("value").is_some_and(serde_json::Value::is_number) {
@@ -2126,13 +2141,22 @@ fn validate_analysis_json(value: &serde_json::Value) -> std::result::Result<(), 
                     _ => return Err(format!("analysis.plateau.{key} 必须是对象或 null")),
                 }
             }
-            if !plateau.get("isolated").is_some_and(serde_json::Value::is_boolean) {
+            if !plateau
+                .get("isolated")
+                .is_some_and(serde_json::Value::is_boolean)
+            {
                 return Err("analysis.plateau.isolated 必须是布尔值".into());
             }
-            if !plateau.get("scores").is_some_and(serde_json::Value::is_array) {
+            if !plateau
+                .get("scores")
+                .is_some_and(serde_json::Value::is_array)
+            {
                 return Err("analysis.plateau.scores 必须是数组".into());
             }
-            if !plateau.get("warnings").is_some_and(serde_json::Value::is_array) {
+            if !plateau
+                .get("warnings")
+                .is_some_and(serde_json::Value::is_array)
+            {
                 return Err("analysis.plateau.warnings 必须是数组".into());
             }
         }
