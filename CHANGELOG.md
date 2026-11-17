@@ -201,3 +201,6 @@
   `efbb00b9...`、`cd330ad9...`、`d84b7985...`、`7c680a05...`、
   `7c4c0da1...`、`f7026895...`/`36ec7667...`、`7f823905...`/`376a13c5...`、
   `4f0e7bd6...`、`41d11ac9...` 全部不变。
+- 提交 `2b8f032` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(185 个)与 `cargo build --release --locked`;
+  冒烟、sweep、walk-forward、1m 与 4 标的 1h 哈希与工作副本一致。

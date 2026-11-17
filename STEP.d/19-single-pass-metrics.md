@@ -105,4 +105,26 @@ bash scripts/check.sh --ci
 
 ## 干净克隆
 
-提交后补充。
+```bash
+git clone /data/qb-m8b /data/qb-m8b-clean
+cd /data/qb-m8b-clean
+cargo test --workspace --locked
+cargo build --release --locked
+R=/data/m8bc-out
+target/release/quant-backtest run --config config/00.smoke.toml --threads 1 --out "$R/00"
+target/release/quant-backtest sweep --config fixtures/sweep.toml --out "$R/sweep"
+target/release/quant-backtest walkforward --config fixtures/walkforward.toml --out "$R/wf"
+target/release/quant-backtest run --config /tmp/qb-m8/bench/perf_run_1m.toml --out "$R/1m"
+target/release/quant-backtest run --config /tmp/m8c_multi.toml --out "$R/multi"
+```
+
+- 提交 `2b8f032` 的干净克隆(与 `data-reader` 同级)通过
+  `cargo test --workspace --locked`(185 个)与
+  `cargo build --release --locked`。
+- 冒烟 `result_hash = efbb00b9...`;`fixtures/sweep.toml` 的
+  `sweep_hash = 41d11ac9...`;`fixtures/walkforward.toml` 的
+  `result_hash = 4f0e7bd6...`。
+- BTCUSDT spot 1m 大样本 `result_hash = f7026895...`、
+  `data_hash = 36ec7667...`;4 标的 UM 1h 样本
+  `result_hash = 7f823905...`、`data_hash = 376a13c5...`,
+  589 笔交易、2184 个权益点,与工作副本一致。
