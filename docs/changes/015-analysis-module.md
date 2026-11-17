@@ -1,7 +1,7 @@
 # 015 统计分析模块设计草案
 
 日期:2026-11-17
-状态:M11-C 已实现并验收;M11-A/B/D/E 待推进
+状态:M11-C 与 M11-A 已实现并验收;M11-B/D/E 待推进
 上游:[需求规格](../01-需求规格.md)、[调研与决策](../02-调研与决策.md)、[流程设计](../03-流程设计.md)
 相关:[014 多标的收盘价标记](./014-multi-symbol-marking.md)
 
@@ -555,6 +555,21 @@ M11-C 验收(2026-11-17):
 - AC-M11-12 未单独跑基准;关闭分析时不进入引擎热路径,留到 M11-A 采集合入时
   一并回归。
 
+M11-A 验收(2026-11-17):
+
+- 218 个测试(含 PBO 与日收益聚合单测)、`cargo fmt --check`、
+  `cargo clippy -D warnings` 与 `cargo doc` 通过;`scripts/check.sh --ci` 除
+  `cargo deny`(网络不可达,环境问题)外全部通过。
+- AC-M11-3/4 由 `pbo` 单测覆盖:40 个随机试验 PBO 落在 `[0.2,0.8]`,
+  加入真实边缘的试验 PBO `<0.25` 且 `best_label` 指向该试验。
+- AC-M11-9/10/11 由配置测试与冒烟覆盖:`sweep` 关闭分析 schema 1.1,
+  开启 schema 1.2;`sweep_hash` 与关闭时逐位相同;1 线程与 2 线程
+  `analysis_hash` 一致;报告 schema 校验通过,旧 1.1/1.2 仍可读。
+- 冒烟(`fixtures/s5_daily.csv`,16 组参数):关闭分析 schema 1.1、PBO 关闭;
+  开启分析 schema 1.2,`pbo=0.0`,16 个试验,252 个组合;1 线程与 2 线程
+  `analysis_hash` 一致;报告写出 PBO 子节与“CSCV 近似”注记。
+- `min_trials` 告警路径与 `pbo_blocks` 超过观测数的跳过路径均有单测覆盖。
+
 PBO 的路径依赖夹具:
 
 - 用带止损的 SmaCross 生成收益,确认报告写出“CSCV 近似”告警。
@@ -594,7 +609,7 @@ M11-C 已于 2026-11-17 完成并验收;其余阶段未开始。
 | schema | 固定 1.3 | 启用 1.3,关闭 1.2 |
 | 统计量 | 5 项 | 5 项 + `valid_samples` |
 
-代码位置:
+代码位置(M11-C):
 
 - `crates/backtest-core/src/analysis/{mod,rng,bootstrap}.rs`
 - `crates/backtest-cli/src/lib.rs` 的 `cmd_run` 与 `print_result`
@@ -602,8 +617,35 @@ M11-C 已于 2026-11-17 完成并验收;其余阶段未开始。
   `validate_report_json`
 - `crates/backtest-core/src/config.rs` 的 `AnalysisConfig`
 
-未做:试验矩阵采集、PBO/CSCV、SPA、plateau、trial registry、`analyze`
-子命令与收益矩阵持久化。
+代码位置(M11-A):
+
+- `crates/backtest-core/src/analysis/pbo.rs`
+- `crates/backtest-core/src/analysis/mod.rs` 的 `analyze_sweep` 与
+  `SweepAnalysisInput`
+- `crates/backtest-core/src/metrics/mod.rs` 的 `daily_equity_returns`
+- `crates/backtest-core/src/engine/mod.rs` 的 `collect_daily_returns`
+- `crates/backtest-cli/src/sweep.rs` 的试验矩阵采集与 PBO 编排
+- `crates/backtest-report/src/lib.rs` 的 `pbo_block` 与 schema 校验
+
+未做:SPA、plateau、trial registry、`analyze` 子命令与收益矩阵持久化。
+
+## 13.1 实现记录(M11-A)
+
+实际落地与草案的差异:
+
+| 项 | 草案 | 实际 |
+| --- | --- | --- |
+| 收益口径 | 日收益矩阵 | sweep 用 `daily_equity_returns` 聚合 bar 权益到 UTC 日收益;`run` 仍用每根 bar |
+| 采集路径 | 引擎加 `daily_returns` | `EngineInput.collect_daily_returns` 开关,关闭时零分配 |
+| 试验矩阵 | 全部 trial | 全部网格 trial(样本内区段),top 100 的 OOS 额外跑法不变 |
+| PBO 组合数 | 全组合 | CSCV 的 `C(S,S/2)`,默认 252,超过 10000 组合告警 |
+| 配置 | 8 个字段 | 解析 `enabled`/`seed`/`bootstrap_samples`/`pbo_blocks`/`min_trials` |
+| schema | 1.3 | sweep 启用 1.2,关闭 1.1;`analysis` 可选 |
+| `sweep_hash` | 可能吸收 analysis | 基础哈希固定 1.1 口径,不吸收 analysis |
+| walk-forward | 支持分析 | 暂不支持,`enabled=true` 时告警 |
+
+代码位置见上文 M11-A 代码位置;`walkforward` 仍调用 `warn_analysis_unsupported`。
+
 
 ## 14. 开放问题
 

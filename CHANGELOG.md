@@ -232,3 +232,20 @@
 - 分析冒烟 1 线程与 2 线程的 `analysis_hash` 一致;release 二进制连续两次
   运行的 `result_hash` 与 `analysis_hash` 均一致;引擎 `config_hash`
   `c36534db...` 与 M9 一致。
+- 2026-11-17:M11-A 验收,218 个测试、fmt、clippy、cargo doc 与 release 构建通过;
+  `scripts/check.sh --ci` 除网络不可达的 `cargo deny` 外全部通过。
+- M11-A:新增 `backtest-core::analysis::pbo`,实现 CSCV/PBO,覆盖 Sharpe 排名、
+  logit 分位数与样本内最优标签;`N < min_trials` 与组合数过多时告警。
+- M11-A:新增 `[analysis].pbo_blocks`(默认 10,偶数 `4..=20`)与
+  `[analysis].min_trials`(默认 20,`>=2`);`analyze_sweep` 剔除长度不一致、空行与
+  非有限收益的试验并告警。
+- M11-A:`sweep` 启用分析时采集每个网格 trial 的 UTC 日收益,计算 PBO 并写入
+  `sweep_summary.json` 的 `analysis`;schema 1.1→1.2,`sweep_hash` 与关闭分析时
+  逐位相同。
+- M11-A:新增 `metrics::daily_equity_returns`,按 UTC 日界聚合权益,支持日内
+  周期压缩到日频;`EngineInput.collect_daily_returns` 关闭时零分配。
+- M11-A:报告第 9 章新增 PBO 子节,含 PBO、组合数、试验数、观测数、logit
+  分位数与“CSCV 近似”注记;`validate_report_json` 校验 `analysis.pbo`。
+- M11-A:冒烟(`fixtures/s5_daily.csv`,16 组参数):关闭分析 schema 1.1;开启分析
+  schema 1.2,`pbo=0.0`,16 个试验,252 个组合;1 线程与 2 线程
+  `analysis_hash` 一致。

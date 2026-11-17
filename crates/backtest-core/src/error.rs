@@ -35,6 +35,8 @@ impl Error {
 pub enum AnalysisError {
     #[error("分析结果序列化失败: {0}")]
     Serialize(String),
+    #[error("分析输入无效: {0}")]
+    Invalid(String),
 }
 
 #[derive(Debug, Error)]

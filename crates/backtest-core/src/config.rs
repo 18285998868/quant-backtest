@@ -524,6 +524,10 @@ pub struct AnalysisConfig {
     pub enabled: bool,
     pub seed: u64,
     pub bootstrap_samples: usize,
+    /// CSCV 时间块数,必须为偶数。
+    pub pbo_blocks: usize,
+    /// PBO 的最小试验数,低于此值只告警。
+    pub min_trials: usize,
 }
 
 impl Default for AnalysisConfig {
@@ -532,6 +536,8 @@ impl Default for AnalysisConfig {
             enabled: false,
             seed: default_analysis_seed(),
             bootstrap_samples: default_bootstrap_samples(),
+            pbo_blocks: default_pbo_blocks(),
+            min_trials: default_min_trials(),
         }
     }
 }
@@ -768,6 +774,10 @@ struct RawAnalysis {
     seed: u64,
     #[serde(default = "default_bootstrap_samples")]
     bootstrap_samples: usize,
+    #[serde(default = "default_pbo_blocks")]
+    pbo_blocks: usize,
+    #[serde(default = "default_min_trials")]
+    min_trials: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -802,6 +812,14 @@ fn default_analysis_seed() -> u64 {
 
 fn default_bootstrap_samples() -> usize {
     1_000
+}
+
+fn default_pbo_blocks() -> usize {
+    10
+}
+
+fn default_min_trials() -> usize {
+    20
 }
 
 fn one() -> f64 {
@@ -1354,10 +1372,18 @@ fn parse_analysis(raw: Option<RawAnalysis>) -> Result<AnalysisConfig> {
             "必须在 [100, 100000] 区间内",
         ));
     }
+    if !(4..=20).contains(&raw.pbo_blocks) || raw.pbo_blocks % 2 != 0 {
+        return Err(field("analysis.pbo_blocks", "必须是 4..=20 的偶数"));
+    }
+    if raw.min_trials < 2 {
+        return Err(field("analysis.min_trials", "必须 >= 2"));
+    }
     Ok(AnalysisConfig {
         enabled: raw.enabled,
         seed: raw.seed,
         bootstrap_samples: raw.bootstrap_samples,
+        pbo_blocks: raw.pbo_blocks,
+        min_trials: raw.min_trials,
     })
 }
 

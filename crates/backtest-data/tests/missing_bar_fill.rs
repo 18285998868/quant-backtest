@@ -41,6 +41,7 @@ fn input() -> EngineInput {
         start_index: 0,
         trade_start_index: 0,
         end_index: usize::MAX,
+        collect_daily_returns: false,
     }
 }
 

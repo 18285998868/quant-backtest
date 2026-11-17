@@ -347,6 +347,37 @@ pub fn equity_returns(equity: &[EquityPoint], initial_cash: f64) -> Vec<f64> {
     out
 }
 
+/// 按 UTC 日界聚合权益后计算简单收益。
+///
+/// 每个 UTC 自然日只取最后一个权益点,收益率序列长度等于交易覆盖的日数;
+/// 日内周期(1m/1h)由此压缩到日频,日线及以上周期与 [`equity_returns`] 等价。
+pub fn daily_equity_returns(equity: &[EquityPoint], initial_cash: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    if !initial_cash.is_finite() || initial_cash <= 0.0 {
+        return out;
+    }
+    let mut current_day: Option<i64> = None;
+    let mut day_equity = initial_cash;
+    let mut previous = initial_cash;
+    for point in equity {
+        let day = point.ts.div_euclid(86_400_000);
+        if let Some(previous_day) = current_day
+            && day != previous_day
+        {
+            if previous > 0.0 {
+                out.push(day_equity / previous - 1.0);
+            }
+            previous = day_equity;
+        }
+        current_day = Some(day);
+        day_equity = point.equity;
+    }
+    if current_day.is_some() && previous > 0.0 {
+        out.push(day_equity / previous - 1.0);
+    }
+    out
+}
+
 fn calendar_years(first: Ts, last: Ts) -> Option<f64> {
     let days = days_between(first, last);
     if days > 0.0 {
@@ -1126,6 +1157,36 @@ mod tests {
         assert!((dsr.trial_sharpe_variance - 0.016_666_666_666_666_673).abs() < 1e-12);
         assert!((dsr.expected_max_sharpe - 0.135_828_472_541_662_53).abs() < 1e-12);
         assert!((dsr.probability - 0.698_530_690_498_564_3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn daily_returns_match_per_bar_returns_for_daily_bars() {
+        let equity = points(&[100.0, 101.0, 99.5, 103.0]);
+        let per_bar = equity_returns(&equity, 100.0);
+        let daily = daily_equity_returns(&equity, 100.0);
+        assert_eq!(daily, per_bar);
+    }
+
+    #[test]
+    fn daily_returns_compound_matches_intraday_path() {
+        let start = 1_699_920_000_000; // 2023-11-12T00:00:00Z, UTC 日界对齐
+        let equity: Vec<EquityPoint> = [100.0, 101.0, 102.0, 101.5, 103.0]
+            .iter()
+            .enumerate()
+            .map(|(index, value)| EquityPoint {
+                ts: start + index as i64 * 6 * 3_600_000,
+                equity: *value,
+                cash: 0.0,
+                gross_exposure: 0.0,
+                drawdown: 0.0,
+            })
+            .collect();
+        let daily = daily_equity_returns(&equity, 100.0);
+        assert_eq!(daily.len(), 2);
+        let compounded = (1.0 + daily[0]) * (1.0 + daily[1]) - 1.0;
+        assert!((compounded - 0.03).abs() < 1e-12);
+        assert!((daily[0] - 0.015).abs() < 1e-12);
+        assert!((daily[1] - (103.0 / 101.5 - 1.0)).abs() < 1e-12);
     }
 
     #[test]

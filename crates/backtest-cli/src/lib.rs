@@ -203,6 +203,7 @@ fn cmd_run(
                 start_index: 0,
                 trade_start_index: 0,
                 end_index: universe.len(),
+                collect_daily_returns: false,
             };
             run_backtest(universe, &input, strategy.as_mut())?
         }
@@ -249,7 +250,6 @@ fn cmd_sweep(
         .into());
     }
     config.apply_overrides(threads, memory_limit_gb, out)?;
-    warn_analysis_unsupported(&config, "sweep");
     let workers = resolve_for(&config)?;
     print_capacity(&workers);
     let history = sweep::Grid::build(&config)?.max_warmup_bars();
@@ -299,10 +299,26 @@ fn cmd_sweep(
         );
     }
     println!("哈希:sweep={}", summary.sweep_hash);
+    if let Some(analysis) = &summary.analysis {
+        println!("哈希:analysis={}", analysis.hash);
+        if let Some(pbo) = &analysis.pbo {
+            println!(
+                "PBO:{:.1}% 组合 {} 试验 {} 区块 {}",
+                pbo.pbo * 100.0,
+                pbo.splits,
+                pbo.trials,
+                pbo.blocks
+            );
+        }
+        for warning in &analysis.warnings {
+            eprintln!("分析告警: {warning}");
+        }
+    }
     println!("产物:{}", paths.csv.display());
     println!("产物:{}", paths.json.display());
     let extras = ReportExtras {
         sweep: Some(run.report),
+        analysis: run.analysis,
         ..ReportExtras::default()
     };
     let report_paths = write_report(&run.best_full, &extras, &config.output_dir)?;
@@ -564,6 +580,7 @@ fn bench_input() -> EngineInput {
         start_index: 0,
         trade_start_index: 0,
         end_index: usize::MAX,
+        collect_daily_returns: false,
     }
 }
 
@@ -812,7 +829,7 @@ fn data_memory_warning(estimated: u64, limit: Option<u64>) -> Option<String> {
 fn warn_analysis_unsupported(config: &RunConfig, command: &str) {
     if config.analysis.enabled {
         eprintln!(
-            "警告: analysis.enabled=true,但当前版本仅 run 支持 bootstrap;{command} 未执行分析"
+            "警告: analysis.enabled=true,但 {command} 目前只输出基础统计,不计算 bootstrap/PBO"
         );
     }
 }

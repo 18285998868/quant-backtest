@@ -349,7 +349,7 @@ fn build_stat(
     }
 }
 
-fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
+pub(crate) fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
     if sorted.is_empty() {
         return None;
     }

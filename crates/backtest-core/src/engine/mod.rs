@@ -32,6 +32,8 @@ pub struct EngineInput {
     pub trade_start_index: usize,
     /// 结束下标,不含。
     pub end_index: usize,
+    /// 统计模式是否额外聚合 UTC 日收益;关闭时不产生额外分配。
+    pub collect_daily_returns: bool,
 }
 
 #[derive(Default)]
@@ -199,6 +201,8 @@ fn validate_range(total: usize, input: &EngineInput) -> Result<usize> {
 pub struct BacktestStats {
     pub metrics: crate::model::Metrics,
     pub period_sharpe: Option<f64>,
+    /// 启用采集时按 UTC 日界聚合的简单收益;否则为 `None`。
+    pub daily_returns: Option<Vec<f64>>,
     pub warnings: Vec<String>,
 }
 
@@ -501,9 +505,14 @@ impl Engine<'_> {
     fn finish_stats(mut self) -> Result<BacktestStats> {
         self.settle_pending_warnings();
         let (metrics, period_sharpe) = compute_metrics_with_period_sharpe(&self.metric_input());
+        let daily_returns = self
+            .input
+            .collect_daily_returns
+            .then(|| crate::metrics::daily_equity_returns(&self.equity, self.input.initial_cash));
         Ok(BacktestStats {
             metrics,
             period_sharpe,
+            daily_returns,
             warnings: self.warnings,
         })
     }
@@ -1799,6 +1808,7 @@ mod tests {
             start_index: 0,
             trade_start_index: 0,
             end_index: usize::MAX,
+            collect_daily_returns: false,
         }
     }
 

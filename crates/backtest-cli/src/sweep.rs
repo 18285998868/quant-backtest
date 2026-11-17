@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use backtest_core::analysis::{AnalysisReport, SweepAnalysisInput, analyze_sweep};
 use backtest_core::config::{Objective, RunConfig};
 use backtest_core::engine::{BacktestStats, EngineInput, run_backtest, run_backtest_stats};
 use backtest_core::error::{ConfigError, Error, ReportError, Result};
@@ -27,6 +28,7 @@ use serde::ser::SerializeStruct;
 use serde_json::Value;
 
 const SCHEMA_VERSION: &str = "1.1";
+const ANALYSIS_SCHEMA_VERSION: &str = "1.2";
 const OOS_SAMPLE_LIMIT: usize = 100;
 const HEATMAP_VALUE_LIMIT: usize = 12;
 
@@ -36,6 +38,7 @@ pub(crate) struct SweepRun {
     pub tasks: Vec<SweepTask>,
     pub report: SweepReport,
     pub best_full: BacktestResult,
+    pub analysis: Option<AnalysisReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +51,8 @@ pub(crate) struct SweepSummary {
     pub results: Vec<SweepTopResult>,
     pub oos: Option<OosReport>,
     pub dsr: Option<DeflatedSharpe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<AnalysisReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +97,8 @@ pub(crate) struct SweepTask {
     pub warning_count: usize,
     pub objective_value: Option<f64>,
     pub period_sharpe: Option<f64>,
+    #[serde(skip)]
+    pub daily_returns: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -285,7 +292,12 @@ fn expand_grid(grid: &BTreeMap<String, Vec<Value>>) -> Result<Vec<BTreeMap<Strin
     Ok(combos)
 }
 
-pub(crate) fn engine_input(config: &RunConfig, threads: usize, range: IndexRange) -> EngineInput {
+pub(crate) fn engine_input(
+    config: &RunConfig,
+    threads: usize,
+    range: IndexRange,
+    collect_daily_returns: bool,
+) -> EngineInput {
     EngineInput {
         initial_cash: config.initial_cash,
         risk_free_rate: config.risk_free_rate,
@@ -300,6 +312,7 @@ pub(crate) fn engine_input(config: &RunConfig, threads: usize, range: IndexRange
         start_index: range.start,
         trade_start_index: range.trade_start,
         end_index: range.end,
+        collect_daily_returns,
     }
 }
 
@@ -312,7 +325,7 @@ pub(crate) fn run_single(
     match data {
         Data::Full(universe) => {
             let mut strategy = build(&config.strategy, universe.symbol_count());
-            let input = engine_input(config, threads, range);
+            let input = engine_input(config, threads, range, false);
             run_backtest(universe, &input, strategy.as_mut())
         }
         Data::Stream { plan, chunk_bars } => {
@@ -326,16 +339,22 @@ fn run_single_stats(
     data: &Data<'_>,
     threads: usize,
     range: IndexRange,
+    collect_daily_returns: bool,
 ) -> Result<BacktestStats> {
     match data {
         Data::Full(universe) => {
             let mut strategy = build(&config.strategy, universe.symbol_count());
-            let input = engine_input(config, threads, range);
+            let input = engine_input(config, threads, range, collect_daily_returns);
             run_backtest_stats(universe, &input, strategy.as_mut())
         }
-        Data::Stream { plan, chunk_bars } => {
-            crate::stream::run_streaming_stats(config, plan, threads, range, *chunk_bars)
-        }
+        Data::Stream { plan, chunk_bars } => crate::stream::run_streaming_stats(
+            config,
+            plan,
+            threads,
+            range,
+            *chunk_bars,
+            collect_daily_returns,
+        ),
     }
 }
 
@@ -345,6 +364,7 @@ pub(crate) fn run_grid(
     data: &Data<'_>,
     range: IndexRange,
     objective: Objective,
+    collect_daily_returns: bool,
 ) -> Result<Vec<SweepTask>> {
     let threads = pool.current_num_threads();
     pool.install(|| {
@@ -352,7 +372,8 @@ pub(crate) fn run_grid(
             .par_iter()
             .enumerate()
             .map(|(index, combo)| {
-                let stats = run_single_stats(&combo.config, data, threads, range)?;
+                let stats =
+                    run_single_stats(&combo.config, data, threads, range, collect_daily_returns)?;
                 let objective_value = objective.value(&stats.metrics);
                 Ok(SweepTask {
                     index,
@@ -362,6 +383,7 @@ pub(crate) fn run_grid(
                     warning_count: stats.warnings.len(),
                     objective_value,
                     period_sharpe: stats.period_sharpe,
+                    daily_returns: stats.daily_returns,
                 })
             })
             .collect::<Result<Vec<_>>>()
@@ -380,7 +402,8 @@ fn run_selected_metrics(
         indices
             .par_iter()
             .map(|index| {
-                let stats = run_single_stats(&grid.combos[*index].config, data, threads, range)?;
+                let stats =
+                    run_single_stats(&grid.combos[*index].config, data, threads, range, false)?;
                 Ok((*index, stats.metrics))
             })
             .collect::<Result<Vec<_>>>()
@@ -448,13 +471,41 @@ pub(crate) fn execute(
         IndexRange::with_warmup(split_index.saturating_sub(warmup), split_index, data.len());
 
     let pool = build_pool(workers.threads)?;
-    let mut tasks = run_grid(&pool, &grid, data, is_range, sweep.objective)?;
+    let mut tasks = run_grid(
+        &pool,
+        &grid,
+        data,
+        is_range,
+        sweep.objective,
+        config.analysis.enabled,
+    )?;
     sort_tasks(&mut tasks);
     let keep = sweep.top_k.min(tasks.len());
     let best_index = tasks
         .first()
         .filter(|task| task.objective_value.is_some())
         .map(|task| task.index);
+
+    let analysis = if config.analysis.enabled {
+        let mut labels = Vec::with_capacity(tasks.len());
+        let mut rows = Vec::with_capacity(tasks.len());
+        for task in &mut tasks {
+            if let Some(row) = task.daily_returns.take() {
+                labels.push(param_label(&task.params));
+                rows.push(row);
+            }
+        }
+        Some(analyze_sweep(&SweepAnalysisInput {
+            labels: &labels,
+            returns: &rows,
+            periods_per_year: config.periods_per_year(),
+            seed: config.analysis.seed,
+            pbo_blocks: config.analysis.pbo_blocks,
+            min_trials: config.analysis.min_trials,
+        })?)
+    } else {
+        None
+    };
 
     let top_indices: Vec<usize> = tasks[..keep].iter().map(|task| task.index).collect();
     let top_runs = run_selected(&pool, &grid, &top_indices, data, is_range)?;
@@ -565,7 +616,11 @@ pub(crate) fn execute(
         warnings,
     };
     let mut summary = SweepSummary {
-        schema_version: SCHEMA_VERSION,
+        schema_version: if analysis.is_some() {
+            ANALYSIS_SCHEMA_VERSION
+        } else {
+            SCHEMA_VERSION
+        },
         sweep_hash: String::new(),
         meta: SweepMeta {
             strategy: config.strategy.name().to_string(),
@@ -595,6 +650,7 @@ pub(crate) fn execute(
         results: top_results,
         oos: Some(oos.clone()),
         dsr: dsr.clone(),
+        analysis: analysis.clone(),
     };
     summary.sweep_hash = summary_hash(&summary)?;
 
@@ -615,6 +671,7 @@ pub(crate) fn execute(
         dsr,
         sweep_hash: summary.sweep_hash.clone(),
         elapsed_ms: summary.meta.elapsed_ms,
+        analysis: analysis.clone(),
     };
 
     let best_config = best_index.map(|index| &grid.combos[index].config);
@@ -634,7 +691,22 @@ pub(crate) fn execute(
         tasks,
         report,
         best_full,
+        analysis,
     })
+}
+
+fn param_label(params: &BTreeMap<String, Value>) -> String {
+    params
+        .iter()
+        .map(|(name, value)| {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            format!("{name}={text}")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn build_marginals(grid: &BTreeMap<String, Vec<Value>>, tasks: &[SweepTask]) -> Vec<ParamMarginal> {
@@ -918,7 +990,9 @@ impl CanonicalItem for CanonicalSummary<'_> {
         state.serialize_field("oos_split", &meta.oos_split)?;
         state.serialize_field("oos_warmup_bars", &meta.oos_warmup_bars)?;
         state.serialize_field("results", &CanonicalSlice(&summary.results))?;
-        state.serialize_field("schema_version", &summary.schema_version)?;
+        // 基础扫描哈希固定用 1.1 口径,不吸收 analysis;启用分析的摘要仍可复用
+        // 同一 sweep_hash。
+        state.serialize_field("schema_version", &SCHEMA_VERSION)?;
         state.serialize_field("split_index", &meta.split_index)?;
         state.serialize_field("strategy", &meta.strategy)?;
         state.serialize_field("top_k", &meta.top_k)?;
@@ -1161,6 +1235,36 @@ periods_per_year = 365
         std::fs::write(&path, text).expect("write");
         let error = run(&path, 1).expect_err("all invalid");
         assert!(error.to_string().contains("全部非法"));
+    }
+
+    #[test]
+    fn analysis_keeps_sweep_hash_and_adds_pbo() {
+        let (_dir, path) = fixture_config(25, 5);
+        let off = run(&path, 1).expect("off");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let analysis_path = path.with_file_name("analysis.toml");
+        std::fs::write(
+            &analysis_path,
+            format!(
+                "{text}\n[analysis]\nenabled = true\nseed = 7\nbootstrap_samples = 200\npbo_blocks = 10\nmin_trials = 20\n"
+            ),
+        )
+        .expect("write analysis config");
+        let on = run(&analysis_path, 1).expect("on");
+
+        assert_eq!(off.summary.schema_version, SCHEMA_VERSION);
+        assert_eq!(on.summary.schema_version, ANALYSIS_SCHEMA_VERSION);
+        assert_eq!(off.summary.sweep_hash, on.summary.sweep_hash);
+        assert!(off.analysis.is_none());
+        let analysis = on.analysis.expect("analysis");
+        let pbo = analysis.pbo.expect("pbo");
+        assert_eq!(pbo.blocks, 10);
+        assert_eq!(pbo.trials, 25);
+        assert_eq!(pbo.splits, 252);
+        assert_eq!(
+            on.summary.analysis.as_ref().map(|item| &item.hash),
+            Some(&analysis.hash)
+        );
     }
 
     #[test]

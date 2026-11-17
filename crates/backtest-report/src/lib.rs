@@ -147,6 +147,9 @@ pub struct SweepReport {
     pub dsr: Option<DeflatedSharpe>,
     pub sweep_hash: String,
     pub elapsed_ms: u128,
+    /// 扫描层面的统计分析结果(PBO 等);未启用时为 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<AnalysisReport>,
 }
 
 #[derive(Serialize)]
@@ -1139,8 +1142,26 @@ fn robustness_section(
         walk_forward_block(html, wf);
     }
     if let Some(analysis) = analysis {
-        any = true;
-        bootstrap_block(html, analysis);
+        if analysis.bootstrap.is_some() {
+            any = true;
+            bootstrap_block(html, analysis);
+        }
+        if analysis.pbo.is_some() {
+            any = true;
+            pbo_block(html, analysis);
+        }
+        if analysis.bootstrap.is_none() && analysis.pbo.is_none() {
+            any = true;
+            html.push_str("<div class=\"panel\"><h3>统计分析</h3><p class=\"muted\">分析已启用,但没有可用的结果。</p>");
+            if !analysis.warnings.is_empty() {
+                html.push_str("<ul>\n");
+                for warning in &analysis.warnings {
+                    let _ = writeln!(html, "<li class=\"warn\">{}</li>", escape_html(warning));
+                }
+                html.push_str("</ul>\n");
+            }
+            html.push_str("</div>\n");
+        }
     }
     if !any {
         html.push_str("<div class=\"panel\"><p class=\"muted\">本次未运行样本外、DSR、walk-forward 或 bootstrap。</p></div>\n");
@@ -1225,6 +1246,63 @@ fn bootstrap_value(name: BootstrapStatistic, value: Option<f64>) -> String {
             format!("{:.2}%", value * 100.0)
         }
     }
+}
+
+fn pbo_block(html: &mut String, analysis: &AnalysisReport) {
+    let Some(pbo) = analysis.pbo.as_ref() else {
+        return;
+    };
+    html.push_str("<div class=\"panel\"><h3>回测过拟合概率 PBO</h3>\n");
+    let _ = writeln!(
+        html,
+        "<p class=\"muted\">CSCV 近似 · 时间块 {} · 组合 {} · 试验 {} · 观测 {} 个日收益</p>",
+        pbo.blocks, pbo.splits, pbo.trials, pbo.observations
+    );
+    let label = if pbo.pbo > 0.5 {
+        "PBO 高于 50%,样本内最优在样本外大概率失效。"
+    } else {
+        "PBO 不高于 50%,样本内选择仍可能受随机波动影响。"
+    };
+    let _ = writeln!(
+        html,
+        "<p><span class=\"num\">PBO {:.1}%</span> · {}</p>",
+        pbo.pbo * 100.0,
+        escape_html(label)
+    );
+    if let Some(best) = &pbo.best_label {
+        let _ = writeln!(
+            html,
+            "<p class=\"muted\">最常被选为样本内最优: <code>{}</code></p>",
+            escape_html(best)
+        );
+    }
+    html.push_str(
+        "<table><thead><tr><th>logit 分位</th><th class=\"num\">值</th></tr></thead><tbody>\n",
+    );
+    for (name, value) in [
+        ("均值", pbo.logit_mean),
+        ("p05", pbo.logit_p05),
+        ("p50", pbo.logit_p50),
+        ("p95", pbo.logit_p95),
+    ] {
+        let _ = writeln!(
+            html,
+            "<tr><td>{name}</td><td class=\"num\">{}</td></tr>",
+            num(Some(value), 3)
+        );
+    }
+    html.push_str("</tbody></table>\n");
+    if !pbo.warnings.is_empty() {
+        html.push_str("<ul>\n");
+        for warning in &pbo.warnings {
+            let _ = writeln!(html, "<li class=\"warn\">{}</li>", escape_html(warning));
+        }
+        html.push_str("</ul>\n");
+    }
+    html.push_str(
+        "<p class=\"note\">CSCV 假设时间块可交换;止损、共享账户和路径依赖策略只能近似。当前扫描使用样本内区段日收益,未包含样本外区段。</p>\n",
+    );
+    html.push_str("</div>\n");
 }
 
 fn oos_block(html: &mut String, oos: &OosReport) {
@@ -1862,7 +1940,7 @@ fn validate_analysis_json(value: &serde_json::Value) -> std::result::Result<(), 
     }
     match object.get("bootstrap") {
         None => return Err("analysis 缺少字段 bootstrap".into()),
-        Some(serde_json::Value::Null) => return Ok(()),
+        Some(serde_json::Value::Null) => {}
         Some(serde_json::Value::Object(bootstrap)) => {
             for key in ["samples", "block_length"] {
                 if bootstrap
@@ -1914,6 +1992,29 @@ fn validate_analysis_json(value: &serde_json::Value) -> std::result::Result<(), 
             }
         }
         Some(_) => return Err("analysis.bootstrap 必须是对象或 null".into()),
+    }
+    match object.get("pbo") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Object(pbo)) => {
+            for key in ["pbo", "logit_mean", "logit_p05", "logit_p50", "logit_p95"] {
+                if !pbo.get(key).is_some_and(serde_json::Value::is_number) {
+                    return Err(format!("analysis.pbo.{key} 必须是数值"));
+                }
+            }
+            for key in ["splits", "blocks", "trials", "observations"] {
+                if pbo.get(key).and_then(serde_json::Value::as_u64).is_none() {
+                    return Err(format!("analysis.pbo.{key} 必须是非负整数"));
+                }
+            }
+            match pbo.get("best_label") {
+                Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {}
+                _ => return Err("analysis.pbo.best_label 必须是字符串或 null".into()),
+            }
+            if !pbo.get("warnings").is_some_and(serde_json::Value::is_array) {
+                return Err("analysis.pbo.warnings 必须是数组".into());
+            }
+        }
+        Some(_) => return Err("analysis.pbo 必须是对象或 null".into()),
     }
     Ok(())
 }
@@ -2042,6 +2143,19 @@ mod tests {
                         valid_samples: 998,
                     },
                 ],
+            }),
+            pbo: Some(backtest_core::analysis::PboReport {
+                pbo: 0.25,
+                splits: 252,
+                blocks: 10,
+                trials: 40,
+                observations: 600,
+                logit_mean: -0.4,
+                logit_p05: -1.2,
+                logit_p50: -0.35,
+                logit_p95: 0.6,
+                best_label: Some("fast=5".into()),
+                warnings: vec!["测试 PBO 警告".into()],
             }),
             warnings: vec!["测试分析警告".into()],
         }
@@ -2179,6 +2293,7 @@ mod tests {
             dsr: None,
             sweep_hash: "abc".into(),
             elapsed_ms: 1,
+            analysis: Some(sample_analysis()),
         }
     }
 

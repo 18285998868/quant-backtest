@@ -90,7 +90,7 @@ pub(crate) fn run_streaming(
 ) -> Result<BacktestResult> {
     let mut strategy = build(&config.strategy, plan.symbol_count());
     let history = strategy.history_bars();
-    let input = crate::sweep::engine_input(config, threads, range);
+    let input = crate::sweep::engine_input(config, threads, range, false);
     let options = load_options(config);
     let mut cursor = range.start;
     run_backtest_stream(&input, strategy.as_mut(), || {
@@ -105,10 +105,11 @@ pub(crate) fn run_streaming_stats(
     threads: usize,
     range: IndexRange,
     chunk_bars: usize,
+    collect_daily_returns: bool,
 ) -> Result<BacktestStats> {
     let mut strategy = build(&config.strategy, plan.symbol_count());
     let history = strategy.history_bars();
-    let input = crate::sweep::engine_input(config, threads, range);
+    let input = crate::sweep::engine_input(config, threads, range, collect_daily_returns);
     let options = load_options(config);
     let mut cursor = range.start;
     run_backtest_stream_stats(&input, strategy.as_mut(), || {

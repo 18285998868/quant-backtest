@@ -60,7 +60,7 @@ pub(crate) fn execute(
             window.train_start,
             window.train_end,
         );
-        let mut tasks = sweep::run_grid(&pool, grid, data, train_range, wf.objective)?;
+        let mut tasks = sweep::run_grid(&pool, grid, data, train_range, wf.objective, false)?;
         sweep::sort_tasks(&mut tasks);
         let Some(best) = tasks
             .iter()
