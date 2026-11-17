@@ -66,6 +66,7 @@
 - M8:网格与 OOS 新增 metrics-only 回放 `run_backtest_stats()`/`run_backtest_stream_stats()`,只保留指标、逐期 Sharpe 与告警;top-K 仍生成完整结果。
 - M8:归档按标的并行装载;`RawBar` 去掉 `symbol` 字符串,`finalize()` 直接按标的分桶构造 `BarSeries`;`monthly_returns()` 改为单遍月边界推进。
 - M8:W1–W4 端到端耗时降 27%–42%,峰值 RSS 降 56%–73%,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/18-sweep-metrics-performance.md` 与 `docs/changes/012-sweep-metrics-performance.md`。
+- M8:曲线降采样(P6)未实施,本轮跳过;该改动会改变 `sweep_hash`,需 schema 1.3 与新的哈希基线,留待单独立项。
 
 ### 验收
 

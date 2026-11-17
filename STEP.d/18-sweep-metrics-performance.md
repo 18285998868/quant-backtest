@@ -23,7 +23,7 @@
 | 分桶 | `RawBar` 不再携带 `symbol`,下标与 `LoadOptions::instruments` 对齐 |
 | 月度收益 | 单遍沿月边界推进,结果与旧 `BTreeMap` 实现逐字段一致 |
 | 不变项 | 无新增配置/CLI/报告字段;`config_hash`、`data_hash`、`result_hash`、`sweep_hash` 与 schema 1.1/1.2 不变 |
-| 排除项 | 曲线降采样会改变 `sweep_hash`,留待 schema 升级 |
+| 排除项 | 曲线降采样(P6)未实施,本轮跳过;会改变 `sweep_hash`,需 schema 1.3 与新的哈希基线,留待单独立项 |
 
 ## 验收结果
 
