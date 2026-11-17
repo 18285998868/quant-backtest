@@ -12,6 +12,7 @@ binance-core = { path = "../../../data-reader/crates/binance-core", version = "0
 chrono.workspace = true
 csv.workspace = true
 dukascopy-core = { path = "../../../data-reader/crates/dukascopy-core", version = "0.2.0" }
+rayon.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

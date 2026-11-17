@@ -116,6 +116,7 @@ dependencies = [
  "chrono",
  "csv",
  "dukascopy-core",
+ "rayon",
  "sha2",
  "tempfile",
 ]

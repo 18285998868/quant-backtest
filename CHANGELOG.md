@@ -62,6 +62,10 @@
 - M7:`plan_archive()` 在归档、`start`/`end` 有界且周期短于一天时按 UTC 月分窗规划,逐窗只保留单标的单月 `RawBar`;无界区间、日线及以上、窗口数 `<= 1` 与参考标的无数据回退整段。
 - M7:资金费一次性装载后按 `(首根开盘, 末根收盘]` 过滤,诊断按标的累计月窗口;不修改 `data-reader`,无新增配置、CLI 或报告字段,`data_hash`/`result_hash` 不变。
 - M7:1843200 bar 样本 `validate` 峰值 RSS 从 413.1 MB 降到 38.1 MB,分块 `run` 从 413.7 MB 降到 209.8 MB;新增 `STEP.d/17-monthly-archive-planning.md` 与 `docs/changes/011-monthly-archive-planning.md`。
+- M8:`sweep_hash` 改为流式规范序列化,不再构建 summary `serde_json::Value` 树;`sweep_summary.json` 改为 `BufWriter` 流式写入。
+- M8:网格与 OOS 新增 metrics-only 回放 `run_backtest_stats()`/`run_backtest_stream_stats()`,只保留指标、逐期 Sharpe 与告警;top-K 仍生成完整结果。
+- M8:归档按标的并行装载;`RawBar` 去掉 `symbol` 字符串,`finalize()` 直接按标的分桶构造 `BarSeries`;`monthly_returns()` 改为单遍月边界推进。
+- M8:W1–W4 端到端耗时降 27%–42%,峰值 RSS 降 56%–73%,`result_hash`/`sweep_hash` 与历史哈希不变;新增 `STEP.d/18-sweep-metrics-performance.md` 与 `docs/changes/012-sweep-metrics-performance.md`。
 
 ### 验收
 
@@ -172,3 +176,13 @@
 - 提交 `9782a68` 的干净克隆(与 `data-reader` 同级)通过
   `cargo test --workspace --locked`(181 个)与 `cargo build --release --locked`;
   大样本 `validate` 与多标的整段/分块哈希与工作副本一致。
+- 2026-11-17:M8 验收,184 个测试、fmt、clippy、release 构建与
+  `scripts/check.sh --ci` 全部通过。
+- W1–W4 对比 M7 二进制:耗时 6.4→3.8 s、6.0→4.2 s、29→21 s、
+  17.7→10.3 s;峰值 RSS 2850→975 MB、2700→720 MB、4250→1295 MB、
+  6030→2645 MB。
+- W1–W4 的 `sweep_hash` 分别为 `1bf1e216...`、`32f6ee94...`、
+  `e19d0b73...`、`4a3f718e...`,与 M7 逐位一致。
+- 历史哈希保持不变:`efbb00b9...`、`cd330ad9...`、`d84b7985...`、
+  `7c680a05...`、`7c4c0da1...`、`f7026895...`/`36ec7667...`、
+  `7f823905...`/`376a13c5...`、`4f0e7bd6...`、`41d11ac9...`。

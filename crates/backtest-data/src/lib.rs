@@ -4,7 +4,7 @@
 //! 时间线校验与 `data_hash` 计算,因此同一份内容无论来自 CSV 还是归档都得到
 //! 相同哈希。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
@@ -134,7 +134,7 @@ fn plan_csv(options: &LoadOptions<'_>, path: &Path) -> Result<(DataPlan, LoadDia
             } else if let Some(expected) = timeline.get(counts[symbol_id]) {
                 if *expected != bar.ts {
                     return Err(DataError::TimelineMismatch {
-                        symbol: bar.symbol.clone(),
+                        symbol: options.instruments[symbol_id].symbol.clone(),
                         expected: Some(*expected),
                         actual: Some(bar.ts),
                     }
@@ -142,7 +142,7 @@ fn plan_csv(options: &LoadOptions<'_>, path: &Path) -> Result<(DataPlan, LoadDia
                 }
             } else {
                 return Err(DataError::TimelineMismatch {
-                    symbol: bar.symbol.clone(),
+                    symbol: options.instruments[symbol_id].symbol.clone(),
                     expected: None,
                     actual: Some(bar.ts),
                 }
@@ -344,14 +344,14 @@ fn plan_archive_windows(
                 if let Some(last) = previous {
                     if bar.ts == last {
                         return Err(DataError::Duplicate {
-                            symbol: bar.symbol,
+                            symbol: spec.symbol.clone(),
                             ts: bar.ts,
                         }
                         .into());
                     }
                     if bar.ts < last {
                         return Err(DataError::Unsorted {
-                            symbol: bar.symbol,
+                            symbol: spec.symbol.clone(),
                             ts: bar.ts,
                         }
                         .into());
@@ -584,13 +584,19 @@ pub fn load_window(
 
 #[derive(Debug, Clone)]
 pub(crate) struct RawBar {
-    pub symbol: String,
     pub ts: Ts,
     pub open: f64,
     pub high: f64,
     pub low: f64,
     pub close: f64,
     pub volume: f64,
+}
+
+/// 按标的顺序分桶的原始 bar,下标与 `LoadOptions::instruments` 一致。
+pub(crate) type RawBars = Vec<Vec<RawBar>>;
+
+fn empty_buckets(count: usize) -> RawBars {
+    (0..count).map(|_| Vec::new()).collect()
 }
 
 /// 只返回数据本身,丢弃诊断信息。
@@ -625,6 +631,7 @@ fn scan_csv(
     end: Option<Ts>,
     sink: &mut dyn FnMut(usize, RawBar) -> Result<()>,
 ) -> Result<()> {
+    debug_assert!(!instruments.is_empty());
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
@@ -654,40 +661,40 @@ fn scan_csv(
             message: source.to_string(),
         })?;
         let row = record.position().map(|p| p.line()).unwrap_or(0);
-        let bar = parse_record(&record, &columns, path, row)?;
-        let symbol_id = *ids
-            .get(bar.symbol.as_str())
-            .ok_or_else(|| DataError::UnknownSymbol {
-                symbol: bar.symbol.clone(),
-            })?;
+        let (symbol, bar) = parse_record(&record, &columns, path, row)?;
+        let symbol_id = *ids.get(symbol).ok_or_else(|| DataError::UnknownSymbol {
+            symbol: symbol.to_string(),
+        })?;
         if let Some(prev_symbol) = &last_symbol {
-            if bar.symbol == *prev_symbol {
+            if symbol == prev_symbol.as_str() {
                 if let Some(prev_ts) = last_ts {
                     if bar.ts == prev_ts {
                         return Err(DataError::Duplicate {
-                            symbol: bar.symbol,
+                            symbol: symbol.to_string(),
                             ts: bar.ts,
                         }
                         .into());
                     }
                     if bar.ts < prev_ts {
                         return Err(DataError::Unsorted {
-                            symbol: bar.symbol,
+                            symbol: symbol.to_string(),
                             ts: bar.ts,
                         }
                         .into());
                     }
                 }
-            } else if bar.symbol.as_str() < prev_symbol.as_str() {
+            } else if symbol < prev_symbol.as_str() {
                 return Err(DataError::Unsorted {
-                    symbol: bar.symbol,
+                    symbol: symbol.to_string(),
                     ts: bar.ts,
                 }
                 .into());
             }
         }
         last_ts = Some(bar.ts);
-        last_symbol = Some(bar.symbol.clone());
+        if last_symbol.as_deref() != Some(symbol) {
+            last_symbol = Some(symbol.to_string());
+        }
         if bar.ts >= start && bar.ts < end {
             sink(symbol_id, bar)?;
         }
@@ -700,13 +707,13 @@ fn read_csv(
     instruments: &[InstrumentSpec],
     start: Option<Ts>,
     end: Option<Ts>,
-) -> Result<Vec<RawBar>> {
-    let mut bars = Vec::new();
-    scan_csv(path, instruments, start, end, &mut |_, bar| {
-        bars.push(bar);
+) -> Result<RawBars> {
+    let mut bars = empty_buckets(instruments.len());
+    scan_csv(path, instruments, start, end, &mut |symbol_id, bar| {
+        bars[symbol_id].push(bar);
         Ok(())
     })?;
-    if bars.is_empty() {
+    if bars.iter().all(Vec::is_empty) {
         if start.is_some() || end.is_some() {
             return Err(DataError::EmptyRange {
                 symbol: instruments[0].symbol.clone(),
@@ -725,11 +732,12 @@ fn read_csv(
 
 fn finalize(
     options: &LoadOptions<'_>,
-    bars: Vec<RawBar>,
+    mut bars: RawBars,
     funding: Vec<FundingSeries>,
     diagnostics: LoadDiagnostics,
 ) -> Result<(Universe, LoadDiagnostics)> {
-    if bars.is_empty() {
+    debug_assert_eq!(bars.len(), options.instruments.len());
+    if bars.iter().all(Vec::is_empty) {
         return Err(match options.source {
             LoadSource::Csv(path) => DataError::Empty {
                 path: path.to_path_buf(),
@@ -744,48 +752,33 @@ fn finalize(
 
     let start = options.start.unwrap_or(i64::MIN);
     let end = options.end.unwrap_or(i64::MAX);
-    let mut by_symbol: BTreeMap<String, Vec<RawBar>> = BTreeMap::new();
-    let mut last_by_symbol: BTreeMap<String, Ts> = BTreeMap::new();
-    for bar in bars {
-        if let Some(previous) = last_by_symbol.get(&bar.symbol) {
-            if bar.ts == *previous {
-                return Err(DataError::Duplicate {
-                    symbol: bar.symbol,
-                    ts: bar.ts,
-                }
-                .into());
-            }
-            if bar.ts < *previous {
-                return Err(DataError::Unsorted {
-                    symbol: bar.symbol,
-                    ts: bar.ts,
-                }
-                .into());
-            }
-        }
-        last_by_symbol.insert(bar.symbol.clone(), bar.ts);
-        by_symbol.entry(bar.symbol.clone()).or_default().push(bar);
-    }
-
     let mut series = Vec::with_capacity(options.instruments.len());
-    for (symbol_id, spec) in options.instruments.iter().enumerate() {
-        let Some(item) = by_symbol.remove(&spec.symbol) else {
+    for (symbol_id, (item, spec)) in bars.iter_mut().zip(options.instruments).enumerate() {
+        if item.is_empty() {
             return Err(DataError::MissingSymbolData {
                 symbol: spec.symbol.clone(),
             }
             .into());
-        };
-        let item = item
-            .into_iter()
-            .filter(|bar| bar.ts >= start && bar.ts < end)
-            .collect::<Vec<_>>();
-        if item.is_empty() {
-            return Err(DataError::EmptyRange {
-                symbol: spec.symbol.clone(),
-                start,
-                end,
+        }
+        let mut previous: Option<Ts> = None;
+        for bar in item.iter() {
+            if let Some(last) = previous {
+                if bar.ts == last {
+                    return Err(DataError::Duplicate {
+                        symbol: spec.symbol.clone(),
+                        ts: bar.ts,
+                    }
+                    .into());
+                }
+                if bar.ts < last {
+                    return Err(DataError::Unsorted {
+                        symbol: spec.symbol.clone(),
+                        ts: bar.ts,
+                    }
+                    .into());
+                }
             }
-            .into());
+            previous = Some(bar.ts);
         }
         let mut result = BarSeries {
             symbol: symbol_id as u32,
@@ -796,7 +789,10 @@ fn finalize(
             close: Vec::with_capacity(item.len()),
             volume: Vec::with_capacity(item.len()),
         };
-        for bar in item {
+        for bar in item.drain(..) {
+            if bar.ts < start || bar.ts >= end {
+                continue;
+            }
             result.ts.push(bar.ts);
             result.open.push(bar.open);
             result.high.push(bar.high);
@@ -804,10 +800,15 @@ fn finalize(
             result.close.push(bar.close);
             result.volume.push(bar.volume);
         }
+        if result.ts.is_empty() {
+            return Err(DataError::EmptyRange {
+                symbol: spec.symbol.clone(),
+                start,
+                end,
+            }
+            .into());
+        }
         series.push(result);
-    }
-    if let Some((symbol, _)) = by_symbol.into_iter().next() {
-        return Err(DataError::UnknownSymbol { symbol }.into());
     }
 
     let timeline = series[0].ts.clone();
@@ -963,8 +964,13 @@ impl Columns {
     }
 }
 
-fn parse_record(record: &StringRecord, columns: &Columns, path: &Path, row: u64) -> Result<RawBar> {
-    let symbol = record.get(columns.symbol).unwrap_or("").trim().to_string();
+fn parse_record<'a>(
+    record: &'a StringRecord,
+    columns: &Columns,
+    path: &Path,
+    row: u64,
+) -> Result<(&'a str, RawBar)> {
+    let symbol = record.get(columns.symbol).unwrap_or("").trim();
     if symbol.is_empty() {
         return Err(DataError::InvalidRow {
             path: path.to_path_buf(),
@@ -985,7 +991,7 @@ fn parse_record(record: &StringRecord, columns: &Columns, path: &Path, row: u64)
     let low = parse_number(record.get(columns.low), path, row, "low")?;
     let close = parse_number(record.get(columns.close), path, row, "close")?;
     let volume = parse_number(record.get(columns.volume), path, row, "volume")?;
-    validate_ohlc(&symbol, ts, open, high, low, close)?;
+    validate_ohlc(symbol, ts, open, high, low, close)?;
     if !volume.is_finite() || volume < 0.0 {
         return Err(DataError::InvalidRow {
             path: path.to_path_buf(),
@@ -994,15 +1000,17 @@ fn parse_record(record: &StringRecord, columns: &Columns, path: &Path, row: u64)
         }
         .into());
     }
-    Ok(RawBar {
+    Ok((
         symbol,
-        ts,
-        open,
-        high,
-        low,
-        close,
-        volume,
-    })
+        RawBar {
+            ts,
+            open,
+            high,
+            low,
+            close,
+            volume,
+        },
+    ))
 }
 
 pub(crate) fn validate_ohlc(
@@ -1294,9 +1302,8 @@ mod tests {
         assert!(matches!(error, Error::Data(DataError::EmptyRange { .. })));
     }
 
-    fn raw_bar(index: i64, symbol: &str) -> RawBar {
+    fn raw_bar(index: i64) -> RawBar {
         RawBar {
-            symbol: symbol.into(),
             ts: BASE_TS + index * DAY,
             open: 100.0,
             high: 101.0,
@@ -1319,7 +1326,7 @@ mod tests {
     #[test]
     fn funding_filters_to_bar_window_and_changes_hash() {
         let specs = [spec("AAA")];
-        let bars = vec![raw_bar(0, "AAA"), raw_bar(1, "AAA")];
+        let bars = vec![vec![raw_bar(0), raw_bar(1)]];
         let options = funding_options(&specs);
         let (without, _) = finalize(
             &options,
@@ -1356,7 +1363,7 @@ mod tests {
             }];
             let error = finalize(
                 &options,
-                vec![raw_bar(0, "AAA"), raw_bar(1, "AAA")],
+                vec![vec![raw_bar(0), raw_bar(1)]],
                 funding,
                 LoadDiagnostics::default(),
             )

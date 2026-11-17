@@ -283,6 +283,33 @@ pub fn content_hash(result: &BacktestResult) -> Result<String> {
     Ok(out)
 }
 
+/// 按旧版 `serde_json::Value` 的字典序流式计算规范 JSON 的 SHA-256。
+///
+/// `serde_json` 默认把对象键存进 `BTreeMap`,旧实现因此按字典序输出。实现
+/// [`CanonicalItem`] 的类型按同一顺序逐字段写入哈希器,不构建 `Value` 树或
+/// 完整 JSON 字节。
+pub fn canonical_hash<T: CanonicalItem + ?Sized>(value: &T) -> Result<String> {
+    let mut hasher = Sha256::new();
+    {
+        let mut writer = BufWriter::new(HashWriter {
+            hasher: &mut hasher,
+        });
+        serde_json::to_writer(&mut writer, &CanonicalRef(value)).map_err(|err| {
+            ReportError::Serialize {
+                message: err.to_string(),
+            }
+        })?;
+        writer.flush().map_err(|err| ReportError::Serialize {
+            message: format!("写入内容哈希失败: {err}"),
+        })?;
+    }
+    let mut out = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    Ok(out)
+}
+
 struct HashWriter<'a> {
     hasher: &'a mut Sha256,
 }
@@ -323,15 +350,19 @@ impl Serialize for CanonicalResult<'_> {
     }
 }
 
-trait CanonicalItem {
+/// 按旧版 `Value` 的字典序逐字段写出结构体。
+pub trait CanonicalItem {
+    /// 将 `self` 写成规范 JSON 片段。
     fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer;
 }
 
-struct CanonicalRef<'a, T: CanonicalItem>(&'a T);
+/// 在数组或 `Option` 中包装一个规范序列化项。
+#[derive(Debug)]
+pub struct CanonicalRef<'a, T: CanonicalItem + ?Sized>(pub &'a T);
 
-impl<T: CanonicalItem> Serialize for CanonicalRef<'_, T> {
+impl<T: CanonicalItem + ?Sized> Serialize for CanonicalRef<'_, T> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -340,7 +371,9 @@ impl<T: CanonicalItem> Serialize for CanonicalRef<'_, T> {
     }
 }
 
-struct CanonicalSlice<'a, T: CanonicalItem>(&'a [T]);
+/// 在数组中包装一组规范序列化项。
+#[derive(Debug)]
+pub struct CanonicalSlice<'a, T: CanonicalItem>(pub &'a [T]);
 
 impl<T: CanonicalItem> Serialize for CanonicalSlice<'_, T> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -519,6 +552,44 @@ impl CanonicalItem for MonthlyReturn {
         state.serialize_field("month", &self.month)?;
         state.serialize_field("return_pct", &self.return_pct)?;
         state.serialize_field("year", &self.year)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for OosReport {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("OosReport", 10)?;
+        state.serialize_field("best_params", &self.best_params)?;
+        state.serialize_field("in_sample", &CanonicalRef(&self.in_sample))?;
+        state.serialize_field("out_sample", &CanonicalRef(&self.out_sample))?;
+        state.serialize_field("rank_correlation", &self.rank_correlation)?;
+        state.serialize_field("sample_size", &self.sample_size)?;
+        state.serialize_field("split", &self.split)?;
+        state.serialize_field("split_index", &self.split_index)?;
+        state.serialize_field("truncated", &self.truncated)?;
+        state.serialize_field("warmup_bars", &self.warmup_bars)?;
+        state.serialize_field("warnings", &self.warnings)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for DeflatedSharpe {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("DeflatedSharpe", 8)?;
+        state.serialize_field("expected_max_sharpe", &self.expected_max_sharpe)?;
+        state.serialize_field("kurtosis", &self.kurtosis)?;
+        state.serialize_field("observations", &self.observations)?;
+        state.serialize_field("probability", &self.probability)?;
+        state.serialize_field("sharpe_per_period", &self.sharpe_per_period)?;
+        state.serialize_field("skewness", &self.skewness)?;
+        state.serialize_field("trial_sharpe_variance", &self.trial_sharpe_variance)?;
+        state.serialize_field("trials", &self.trials)?;
         state.end()
     }
 }

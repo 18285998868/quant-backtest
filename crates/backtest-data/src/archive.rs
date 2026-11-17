@@ -19,12 +19,12 @@ use backtest_core::config::{BinanceMarket, DukascopyPrice, SourceConfig};
 use backtest_core::error::{ConfigError, DataError, Error, Result};
 use backtest_core::model::{FundingSeries, InstrumentSpec, TimeUnit, Timeframe, Ts};
 
-use crate::{LoadDiagnostics, LoadOptions, RawBar, validate_ohlc};
+use crate::{LoadDiagnostics, LoadOptions, RawBar, RawBars, validate_ohlc};
 
 pub(crate) fn load(
     options: &LoadOptions<'_>,
     source: &SourceConfig,
-) -> Result<(Vec<RawBar>, Vec<FundingSeries>, LoadDiagnostics)> {
+) -> Result<(RawBars, Vec<FundingSeries>, LoadDiagnostics)> {
     match source {
         SourceConfig::Binance(source) => load_binance(options, source),
         SourceConfig::Dukascopy(source) => load_dukascopy(options, source),
@@ -292,21 +292,40 @@ impl BarStats {
 fn load_binance(
     options: &LoadOptions<'_>,
     source: &backtest_core::config::BinanceSource,
-) -> Result<(Vec<RawBar>, Vec<FundingSeries>, LoadDiagnostics)> {
+) -> Result<(RawBars, Vec<FundingSeries>, LoadDiagnostics)> {
+    use rayon::prelude::*;
+
     let interval = binance_interval_checked(options.timeframe)?;
     let window = date_window(options.start, options.end, options.timeframe.duration_ms())?;
 
-    let mut bars = Vec::new();
-    let mut notes = Vec::new();
+    let loaded = options
+        .instruments
+        .par_iter()
+        .enumerate()
+        .map(|(symbol_id, spec)| {
+            let (bars, stats) =
+                load_binance_bars(source, spec, interval, &window, options.timeframe, false)?;
+            let funding = if source.funding {
+                let (series, funding_stats) =
+                    load_binance_funding(source, spec, symbol_id as u32, &window)?;
+                Some((series, funding_stats))
+            } else {
+                None
+            };
+            Ok((bars, stats, funding))
+        })
+        .collect::<Vec<Result<_>>>();
+    // 按标的顺序取第一个错误,保证多标的失败时的报错与串行路径一致。
+    let loaded = loaded.into_iter().collect::<Result<Vec<_>>>()?;
+
+    let mut bars = Vec::with_capacity(loaded.len());
     let mut funding = Vec::new();
-    for (symbol_id, spec) in options.instruments.iter().enumerate() {
-        let (mut symbol_bars, stats) =
-            load_binance_bars(source, spec, interval, &window, options.timeframe, false)?;
-        bars.append(&mut symbol_bars);
+    let mut notes = Vec::with_capacity(loaded.len() * 2);
+    for (index, (symbol_bars, stats, symbol_funding)) in loaded.into_iter().enumerate() {
+        let spec = &options.instruments[index];
+        bars.push(symbol_bars);
         notes.push(stats.note(source.market.as_str(), &spec.symbol, options.timeframe));
-        if source.funding {
-            let (series, funding_stats) =
-                load_binance_funding(source, spec, symbol_id as u32, &window)?;
+        if let Some((series, funding_stats)) = symbol_funding {
             funding.push(series);
             notes.push(funding_stats.note(source.market.as_str(), &spec.symbol));
         }
@@ -371,7 +390,6 @@ fn load_binance_bars(
         )?;
         debug_assert_eq!(ts - open_time[index], timeframe.duration_ms());
         bars.push(RawBar {
-            symbol: spec.symbol.clone(),
             ts,
             open: open[index],
             high: high[index],
@@ -499,17 +517,25 @@ fn dukascopy_price(price: DukascopyPrice) -> dukascopy_core::PriceType {
 fn load_dukascopy(
     options: &LoadOptions<'_>,
     source: &backtest_core::config::DukascopySource,
-) -> Result<(Vec<RawBar>, Vec<FundingSeries>, LoadDiagnostics)> {
+) -> Result<(RawBars, Vec<FundingSeries>, LoadDiagnostics)> {
+    use rayon::prelude::*;
+
     let timeframe = dukascopy_timeframe_checked(options.timeframe)?;
     let duration = options.timeframe.duration_ms();
     let window = date_window(options.start, options.end, duration)?;
 
-    let mut bars = Vec::new();
-    let mut notes = Vec::new();
-    for spec in options.instruments {
-        let (mut symbol_bars, stats) =
-            load_dukascopy_bars(source, spec, timeframe, &window, duration)?;
-        bars.append(&mut symbol_bars);
+    let loaded = options
+        .instruments
+        .par_iter()
+        .map(|spec| load_dukascopy_bars(source, spec, timeframe, &window, duration))
+        .collect::<Vec<Result<_>>>();
+    // 按标的顺序取第一个错误,保证多标的失败时的报错与串行路径一致。
+    let loaded = loaded.into_iter().collect::<Result<Vec<_>>>()?;
+    let mut bars = Vec::with_capacity(loaded.len());
+    let mut notes = Vec::with_capacity(loaded.len());
+    for (index, (symbol_bars, stats)) in loaded.into_iter().enumerate() {
+        let spec = &options.instruments[index];
+        bars.push(symbol_bars);
         notes.push(stats.note(source.price_type.as_str(), &spec.symbol, options.timeframe));
     }
     Ok((bars, Vec::new(), LoadDiagnostics { notes }))
@@ -554,7 +580,6 @@ fn load_dukascopy_bars(
             columns.close()[index],
         )?;
         bars.push(RawBar {
-            symbol: spec.symbol.clone(),
             ts,
             open: columns.open()[index],
             high: columns.high()[index],

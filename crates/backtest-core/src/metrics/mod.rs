@@ -1,6 +1,4 @@
-use std::collections::BTreeMap;
-
-use chrono::{DateTime, Datelike};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
 use crate::model::{
     DeflatedSharpe, DrawdownEpisode, EquityPoint, FillRecord, Metrics, MonthlyReturn, TradeRecord,
@@ -18,9 +16,17 @@ pub struct MetricInput<'a> {
 }
 
 pub fn compute_metrics(input: &MetricInput<'_>) -> Metrics {
+    compute_metrics_with_period_sharpe(input).0
+}
+
+/// 与 [`compute_metrics`] 相同,同时返回未年化的逐期 Sharpe。
+///
+/// 网格扫描只保留指标时需要 `period_sharpe`,复用同一份收益序列可避免再遍历
+/// 一次权益曲线。
+pub fn compute_metrics_with_period_sharpe(input: &MetricInput<'_>) -> (Metrics, Option<f64>) {
     let mut metrics = Metrics::empty(input.periods_per_year, input.risk_free_rate);
     if input.equity.is_empty() || !input.initial_cash.is_finite() || input.initial_cash <= 0.0 {
-        return metrics;
+        return (metrics, None);
     }
     let n = input.equity.len();
     let first = &input.equity[0];
@@ -39,12 +45,14 @@ pub fn compute_metrics(input: &MetricInput<'_>) -> Metrics {
         metrics.cagr = finite((last.equity / input.initial_cash).powf(1.0 / years) - 1.0);
     }
 
+    let mut period_sharpe = None;
     if returns.len() >= 2 {
         let mean = mean(&returns);
         let std = sample_std(&returns, mean);
         if std > 0.0 {
             metrics.annual_volatility = finite(std * ppy.sqrt());
             metrics.sharpe = finite((mean - rf_per_period) / std * ppy.sqrt());
+            period_sharpe = finite(mean / std);
         }
         let downside: f64 = returns
             .iter()
@@ -125,7 +133,7 @@ pub fn compute_metrics(input: &MetricInput<'_>) -> Metrics {
         .filter(|point| point.gross_exposure > 0.0)
         .count();
     metrics.exposure = finite(exposed as f64 / n as f64);
-    metrics
+    (metrics, period_sharpe)
 }
 
 pub fn drawdown_episodes(
@@ -196,33 +204,88 @@ pub fn monthly_returns(equity: &[EquityPoint], initial_cash: f64) -> Vec<Monthly
     if equity.is_empty() {
         return Vec::new();
     }
-    let mut buckets: BTreeMap<i32, f64> = BTreeMap::new();
+    // 权益时间线按时间递增,只需沿月边界推进,不必为每个点建 BTreeMap 键。
+    let min_ts = DateTime::<Utc>::MIN_UTC.timestamp_millis();
+    let max_ts = DateTime::<Utc>::MAX_UTC.timestamp_millis();
+    let mut out = Vec::new();
     let mut previous = initial_cash;
+    let mut growth = 1.0_f64;
+    let mut has_points = false;
+    let mut key: Option<(i32, u32)> = None;
+    let mut boundary = i64::MAX;
     for point in equity {
-        let Some(dt) = DateTime::from_timestamp_millis(point.ts) else {
+        if point.ts < min_ts || point.ts > max_ts {
             continue;
-        };
-        let key = dt.year() * 100 + dt.month() as i32;
+        }
+        if key.is_none() {
+            let Some(dt) = DateTime::from_timestamp_millis(point.ts) else {
+                continue;
+            };
+            let (year, month) = (dt.year(), dt.month());
+            key = Some((year, month));
+            boundary = month_end_start(year, month).unwrap_or(i64::MAX);
+            has_points = true;
+        } else {
+            let Some((mut year, mut month)) = key else {
+                continue;
+            };
+            while point.ts >= boundary {
+                if has_points {
+                    let return_pct = (growth - 1.0) * 100.0;
+                    if return_pct.is_finite() {
+                        out.push(MonthlyReturn {
+                            year,
+                            month,
+                            return_pct,
+                        });
+                    }
+                }
+                (year, month) = if month == 12 {
+                    (year + 1, 1)
+                } else {
+                    (year, month + 1)
+                };
+                boundary = month_end_start(year, month).unwrap_or(i64::MAX);
+                growth = 1.0;
+                has_points = false;
+            }
+            key = Some((year, month));
+            has_points = true;
+        }
         let r = if previous > 0.0 {
             point.equity / previous - 1.0
         } else {
             0.0
         };
-        *buckets.entry(key).or_insert(1.0) *= 1.0 + r;
+        growth *= 1.0 + r;
         previous = point.equity;
     }
-    buckets
-        .into_iter()
-        .filter_map(|(key, growth)| {
-            let year = key / 100;
-            let month = (key % 100) as u32;
-            finite((growth - 1.0) * 100.0).map(|return_pct| MonthlyReturn {
+    if let Some((year, month)) = key
+        && has_points
+    {
+        let return_pct = (growth - 1.0) * 100.0;
+        if return_pct.is_finite() {
+            out.push(MonthlyReturn {
                 year,
                 month,
                 return_pct,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    out
+}
+
+fn month_end_start(year: i32, month: u32) -> Option<Ts> {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)?
+        .and_hms_opt(0, 0, 0)?
+        .and_utc()
+        .timestamp_millis()
+        .into()
 }
 
 fn series_drawdowns(equity: &[EquityPoint], initial_cash: f64) -> Vec<f64> {
@@ -500,6 +563,103 @@ mod tests {
                 drawdown: 0.0,
             })
             .collect()
+    }
+
+    fn legacy_monthly_returns(equity: &[EquityPoint], initial_cash: f64) -> Vec<MonthlyReturn> {
+        use std::collections::BTreeMap;
+
+        let mut buckets: BTreeMap<i32, f64> = BTreeMap::new();
+        let mut previous = initial_cash;
+        for point in equity {
+            let Some(dt) = DateTime::from_timestamp_millis(point.ts) else {
+                continue;
+            };
+            let key = dt.year() * 100 + dt.month() as i32;
+            let r = if previous > 0.0 {
+                point.equity / previous - 1.0
+            } else {
+                0.0
+            };
+            *buckets.entry(key).or_insert(1.0) *= 1.0 + r;
+            previous = point.equity;
+        }
+        buckets
+            .into_iter()
+            .filter_map(|(key, growth)| {
+                finite((growth - 1.0) * 100.0).map(|return_pct| MonthlyReturn {
+                    year: key / 100,
+                    month: (key % 100) as u32,
+                    return_pct,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fast_monthly_returns_match_legacy() {
+        let start = NaiveDate::from_ymd_opt(2020, 1, 15)
+            .expect("date")
+            .and_hms_opt(0, 0, 0)
+            .expect("time")
+            .and_utc()
+            .timestamp_millis();
+        let mut equity = Vec::new();
+        for day in 0..1_200 {
+            let ts = start + day * 86_400_000;
+            let wave = (day as f64 * 0.037).sin() * 0.03;
+            equity.push(EquityPoint {
+                ts,
+                equity: 100_000.0 * (1.0 + day as f64 * 0.0002 + wave),
+                cash: 0.0,
+                gross_exposure: 0.0,
+                drawdown: 0.0,
+            });
+        }
+        // 两个月的空档、非法时间戳与月初点。
+        let gap_start = start + 1_200 * 86_400_000;
+        equity.push(EquityPoint {
+            ts: gap_start,
+            equity: 130_000.0,
+            cash: 0.0,
+            gross_exposure: 0.0,
+            drawdown: 0.0,
+        });
+        equity.push(EquityPoint {
+            ts: DateTime::<Utc>::MAX_UTC.timestamp_millis() + 1,
+            equity: 1.0,
+            cash: 0.0,
+            gross_exposure: 0.0,
+            drawdown: 0.0,
+        });
+        let month_start = NaiveDate::from_ymd_opt(2023, 6, 1)
+            .expect("date")
+            .and_hms_opt(0, 0, 0)
+            .expect("time")
+            .and_utc()
+            .timestamp_millis();
+        for offset in 0..90 {
+            equity.push(EquityPoint {
+                ts: month_start + offset * 86_400_000,
+                equity: 140_000.0 + offset as f64 * 10.0,
+                cash: 0.0,
+                gross_exposure: 0.0,
+                drawdown: 0.0,
+            });
+        }
+
+        let fast = monthly_returns(&equity, 100_000.0);
+        let legacy = legacy_monthly_returns(&equity, 100_000.0);
+        assert_eq!(fast.len(), legacy.len());
+        for (left, right) in fast.iter().zip(&legacy) {
+            assert_eq!((left.year, left.month), (right.year, right.month));
+            assert_eq!(
+                left.return_pct.to_bits(),
+                right.return_pct.to_bits(),
+                "{} vs {}",
+                left.return_pct,
+                right.return_pct
+            );
+        }
     }
 
     #[test]

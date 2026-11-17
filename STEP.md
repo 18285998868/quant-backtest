@@ -91,7 +91,8 @@ Binance 期货默认结算资金费,可用 `source.funding = false` 关闭。
 [M4 分块流式加载](./STEP.d/14-chunking.md)、
 [M5 walk-forward 分块](./STEP.d/15-walkforward-chunking.md)、
 [M6 报告流式哈希与写入](./STEP.d/16-report-streaming-hash.md) 与
-[M7 归档按月窗口规划](./STEP.d/17-monthly-archive-planning.md)。
+[M7 归档按月窗口规划](./STEP.d/17-monthly-archive-planning.md)、
+[M8 扫描指标与装载性能](./STEP.d/18-sweep-metrics-performance.md)。
 
 ## 步骤
 
@@ -113,3 +114,4 @@ Binance 期货默认结算资金费,可用 `source.funding = false` 关闭。
 - [15 M5 walk-forward 分块验收](./STEP.d/15-walkforward-chunking.md)
 - [16 M6 报告流式哈希与写入验收](./STEP.d/16-report-streaming-hash.md)
 - [17 M7 归档按月窗口规划验收](./STEP.d/17-monthly-archive-planning.md)
+- [18 M8 扫描指标与装载性能验收](./STEP.d/18-sweep-metrics-performance.md)

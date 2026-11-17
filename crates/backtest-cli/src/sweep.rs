@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use backtest_core::config::{Objective, RunConfig};
-use backtest_core::engine::{EngineInput, run_backtest};
+use backtest_core::engine::{BacktestStats, EngineInput, run_backtest, run_backtest_stats};
 use backtest_core::error::{ConfigError, Error, ReportError, Result};
-use backtest_core::metrics::{deflated_sharpe, equity_returns, period_sharpe};
+use backtest_core::metrics::{deflated_sharpe, equity_returns};
 use backtest_core::model::{
     BacktestResult, DeflatedSharpe, DrawdownEpisode, EquityPoint, FillRecord, Metrics,
     MonthlyReturn, TradeRecord, Ts, Universe,
@@ -15,15 +15,16 @@ use backtest_core::model::{
 use backtest_core::system::{ResolvedWorkers, peak_rss_bytes};
 use backtest_data::DataPlan;
 use backtest_report::{
-    HeatmapCell, MarginalPoint, OosReport, ParamMarginal, SweepCounts as ReportCounts,
-    SweepHeatmap, SweepReport, SweepRow,
+    CanonicalItem, CanonicalRef, CanonicalSlice, HeatmapCell, MarginalPoint, OosReport,
+    ParamMarginal, SweepCounts as ReportCounts, SweepHeatmap, SweepReport, SweepRow,
+    canonical_hash,
 };
 use backtest_strategy::build;
 use chrono::{SecondsFormat, Utc};
 use rayon::prelude::*;
 use serde::Serialize;
+use serde::ser::SerializeStruct;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: &str = "1.1";
 const OOS_SAMPLE_LIMIT: usize = 100;
@@ -320,6 +321,24 @@ pub(crate) fn run_single(
     }
 }
 
+fn run_single_stats(
+    config: &RunConfig,
+    data: &Data<'_>,
+    threads: usize,
+    range: IndexRange,
+) -> Result<BacktestStats> {
+    match data {
+        Data::Full(universe) => {
+            let mut strategy = build(&config.strategy, universe.symbol_count());
+            let input = engine_input(config, threads, range);
+            run_backtest_stats(universe, &input, strategy.as_mut())
+        }
+        Data::Stream { plan, chunk_bars } => {
+            crate::stream::run_streaming_stats(config, plan, threads, range, *chunk_bars)
+        }
+    }
+}
+
 pub(crate) fn run_grid(
     pool: &rayon::ThreadPool,
     grid: &Grid,
@@ -328,24 +347,41 @@ pub(crate) fn run_grid(
     objective: Objective,
 ) -> Result<Vec<SweepTask>> {
     let threads = pool.current_num_threads();
-    let initial_cash = grid.combos[0].config.initial_cash;
     pool.install(|| {
         grid.combos
             .par_iter()
             .enumerate()
             .map(|(index, combo)| {
-                let result = run_single(&combo.config, data, threads, range)?;
-                let returns = equity_returns(&result.equity, initial_cash);
-                let objective_value = objective.value(&result.metrics);
+                let stats = run_single_stats(&combo.config, data, threads, range)?;
+                let objective_value = objective.value(&stats.metrics);
                 Ok(SweepTask {
                     index,
                     params: combo.params.clone(),
-                    metrics: result.metrics,
+                    metrics: stats.metrics,
                     config_hash: combo.config.config_hash.clone(),
-                    warning_count: result.warnings.len(),
+                    warning_count: stats.warnings.len(),
                     objective_value,
-                    period_sharpe: period_sharpe(&returns),
+                    period_sharpe: stats.period_sharpe,
                 })
+            })
+            .collect::<Result<Vec<_>>>()
+    })
+}
+
+fn run_selected_metrics(
+    pool: &rayon::ThreadPool,
+    grid: &Grid,
+    indices: &[usize],
+    data: &Data<'_>,
+    range: IndexRange,
+) -> Result<Vec<(usize, Metrics)>> {
+    let threads = pool.current_num_threads();
+    pool.install(|| {
+        indices
+            .par_iter()
+            .map(|index| {
+                let stats = run_single_stats(&grid.combos[*index].config, data, threads, range)?;
+                Ok((*index, stats.metrics))
             })
             .collect::<Result<Vec<_>>>()
     })
@@ -445,11 +481,8 @@ pub(crate) fn execute(
         .take(OOS_SAMPLE_LIMIT)
         .map(|task| task.index)
         .collect();
-    let oos_runs = run_selected(&pool, &grid, &sample_indices, data, oos_range)?;
-    let oos_metrics: BTreeMap<usize, Metrics> = oos_runs
-        .into_iter()
-        .map(|(index, result)| (index, result.metrics))
-        .collect();
+    let oos_runs = run_selected_metrics(&pool, &grid, &sample_indices, data, oos_range)?;
+    let oos_metrics: BTreeMap<usize, Metrics> = oos_runs.into_iter().collect();
 
     let mut xs = Vec::new();
     let mut ys = Vec::new();
@@ -855,39 +888,77 @@ fn value_text(value: &Value) -> String {
 }
 
 fn summary_hash(summary: &SweepSummary) -> Result<String> {
-    let meta = &summary.meta;
-    let value = serde_json::json!({
-        "schema_version": summary.schema_version,
-        "strategy": meta.strategy,
-        "objective": meta.objective,
-        "evaluation": meta.evaluation,
-        "top_k": meta.top_k,
-        "oos_split": meta.oos_split,
-        "split_index": meta.split_index,
-        "oos_warmup_bars": meta.oos_warmup_bars,
-        "config_hash": meta.config_hash,
-        "data_hash": meta.data_hash,
-        "grid": summary.grid,
-        "counts": summary.counts,
-        "results": summary.results,
-        "oos": summary.oos,
-        "dsr": summary.dsr,
-    });
-    let bytes = serde_json::to_vec(&value).map_err(|error| ConfigError::Invalid {
-        field: "sweep_hash".into(),
-        message: error.to_string(),
-    })?;
-    Ok(sha256_hex(&bytes))
+    canonical_hash(&CanonicalSummary(summary)).map_err(|error| {
+        ConfigError::Invalid {
+            field: "sweep_hash".into(),
+            message: error.to_string(),
+        }
+        .into()
+    })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
+struct CanonicalSummary<'a>(&'a SweepSummary);
+
+impl CanonicalItem for CanonicalSummary<'_> {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let summary = self.0;
+        let meta = &summary.meta;
+        let mut state = serializer.serialize_struct("SweepSummary", 15)?;
+        state.serialize_field("config_hash", &meta.config_hash)?;
+        state.serialize_field("counts", &CanonicalRef(&summary.counts))?;
+        state.serialize_field("data_hash", &meta.data_hash)?;
+        state.serialize_field("dsr", &summary.dsr.as_ref().map(CanonicalRef))?;
+        state.serialize_field("evaluation", &meta.evaluation)?;
+        state.serialize_field("grid", &summary.grid)?;
+        state.serialize_field("objective", &meta.objective)?;
+        state.serialize_field("oos", &summary.oos.as_ref().map(CanonicalRef))?;
+        state.serialize_field("oos_split", &meta.oos_split)?;
+        state.serialize_field("oos_warmup_bars", &meta.oos_warmup_bars)?;
+        state.serialize_field("results", &CanonicalSlice(&summary.results))?;
+        state.serialize_field("schema_version", &summary.schema_version)?;
+        state.serialize_field("split_index", &meta.split_index)?;
+        state.serialize_field("strategy", &meta.strategy)?;
+        state.serialize_field("top_k", &meta.top_k)?;
+        state.end()
     }
-    out
+}
+
+impl CanonicalItem for SweepCounts {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("SweepCounts", 4)?;
+        state.serialize_field("skipped_invalid", &self.skipped_invalid)?;
+        state.serialize_field("total", &self.total)?;
+        state.serialize_field("valid", &self.valid)?;
+        state.serialize_field("warnings", &self.warnings)?;
+        state.end()
+    }
+}
+
+impl CanonicalItem for SweepTopResult {
+    fn serialize_canonical<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("SweepTopResult", 11)?;
+        state.serialize_field("config_hash", &self.config_hash)?;
+        state.serialize_field("drawdowns", &CanonicalSlice(&self.drawdowns))?;
+        state.serialize_field("equity", &CanonicalSlice(&self.equity))?;
+        state.serialize_field("fills", &CanonicalSlice(&self.fills))?;
+        state.serialize_field("metrics", &CanonicalRef(&self.metrics))?;
+        state.serialize_field("monthly", &CanonicalSlice(&self.monthly))?;
+        state.serialize_field("params", &self.params)?;
+        state.serialize_field("rank", &self.rank)?;
+        state.serialize_field("result_hash", &self.result_hash)?;
+        state.serialize_field("trades", &CanonicalSlice(&self.trades))?;
+        state.serialize_field("warnings", &self.warnings)?;
+        state.end()
+    }
 }
 
 #[cfg(test)]
@@ -1003,6 +1074,52 @@ periods_per_year = 365
         assert_eq!(first.summary.sweep_hash, second.summary.sweep_hash);
         assert_eq!(first.summary.results.len(), 3);
         assert_eq!(first.summary.counts.valid, 20);
+    }
+
+    fn legacy_summary_hash(summary: &SweepSummary) -> String {
+        use sha2::{Digest, Sha256};
+
+        let meta = &summary.meta;
+        let value = serde_json::json!({
+            "schema_version": summary.schema_version,
+            "strategy": meta.strategy,
+            "objective": meta.objective,
+            "evaluation": meta.evaluation,
+            "top_k": meta.top_k,
+            "oos_split": meta.oos_split,
+            "split_index": meta.split_index,
+            "oos_warmup_bars": meta.oos_warmup_bars,
+            "config_hash": meta.config_hash,
+            "data_hash": meta.data_hash,
+            "grid": summary.grid,
+            "counts": summary.counts,
+            "results": summary.results,
+            "oos": summary.oos,
+            "dsr": summary.dsr,
+        });
+        let bytes = serde_json::to_vec(&value).expect("legacy json");
+        let mut out = String::with_capacity(64);
+        for byte in Sha256::digest(&bytes) {
+            use std::fmt::Write;
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+
+    #[test]
+    fn streaming_summary_hash_matches_legacy_bytes() {
+        let (_dir, path) = fixture_config(20, 3);
+        let mut result = run(&path, 2).expect("sweep");
+        assert_eq!(
+            result.summary.sweep_hash,
+            legacy_summary_hash(&result.summary)
+        );
+        result.summary.oos = None;
+        result.summary.dsr = None;
+        assert_eq!(
+            summary_hash(&result.summary).expect("hash"),
+            legacy_summary_hash(&result.summary)
+        );
     }
 
     #[test]

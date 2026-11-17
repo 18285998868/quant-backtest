@@ -4,7 +4,10 @@ use chrono::{SecondsFormat, Utc};
 
 use crate::config::{ExecutionConfig, RiskConfig, Trigger};
 use crate::error::{ConfigError, ExecutionError, Result};
-use crate::metrics::{MetricInput, compute_metrics, drawdown_episodes, monthly_returns};
+use crate::metrics::{
+    MetricInput, compute_metrics, compute_metrics_with_period_sharpe, drawdown_episodes,
+    monthly_returns,
+};
 use crate::model::{
     BacktestResult, EquityPoint, FillReason, FillRecord, FundingSummary, RunMeta, Side,
     SymbolFunding, TradeRecord, Ts, Universe,
@@ -191,11 +194,36 @@ fn validate_range(total: usize, input: &EngineInput) -> Result<usize> {
     Ok(end_index)
 }
 
+/// 网格扫描与样本外评估只需要指标,不需要完整曲线。
+#[derive(Clone, Debug)]
+pub struct BacktestStats {
+    pub metrics: crate::model::Metrics,
+    pub period_sharpe: Option<f64>,
+    pub warnings: Vec<String>,
+}
+
 pub fn run_backtest(
     universe: &Universe,
     input: &EngineInput,
     strategy: &mut dyn Strategy,
 ) -> Result<BacktestResult> {
+    let mut engine = start_engine(universe, input)?;
+    engine.advance(strategy)?;
+    engine.finish()
+}
+
+/// 只计算指标与逐期 Sharpe,跳过回撤/月度曲线、资金费汇总与报告元数据。
+pub fn run_backtest_stats(
+    universe: &Universe,
+    input: &EngineInput,
+    strategy: &mut dyn Strategy,
+) -> Result<BacktestStats> {
+    let mut engine = start_engine(universe, input)?;
+    engine.advance(strategy)?;
+    engine.finish_stats()
+}
+
+fn start_engine<'a>(universe: &'a Universe, input: &'a EngineInput) -> Result<Engine<'a>> {
     if universe.is_empty() {
         return Err(ConfigError::Invalid {
             field: "data".into(),
@@ -218,13 +246,11 @@ pub fn run_backtest(
         }
         .into());
     }
-    let mut engine = Engine::from_state(
+    Ok(Engine::from_state(
         universe,
         input,
         EngineState::new(universe.symbol_count(), input),
-    );
-    engine.advance(strategy)?;
-    engine.finish()
+    ))
 }
 
 /// 逐窗口回放。`next_window` 返回的窗口按绝对下标递增,窗口之间不能留空洞;
@@ -232,8 +258,49 @@ pub fn run_backtest(
 pub fn run_backtest_stream<F>(
     input: &EngineInput,
     strategy: &mut dyn Strategy,
-    mut next_window: F,
+    next_window: F,
 ) -> Result<BacktestResult>
+where
+    F: FnMut() -> Result<Option<Universe>>,
+{
+    match run_backtest_stream_with(input, strategy, next_window, StreamMode::Full)? {
+        StreamOutput::Full(result) => Ok(*result),
+        StreamOutput::Stats(_) => unreachable!("完整模式返回统计结果"),
+    }
+}
+
+/// 分块回放,只计算指标与逐期 Sharpe。
+pub fn run_backtest_stream_stats<F>(
+    input: &EngineInput,
+    strategy: &mut dyn Strategy,
+    next_window: F,
+) -> Result<BacktestStats>
+where
+    F: FnMut() -> Result<Option<Universe>>,
+{
+    match run_backtest_stream_with(input, strategy, next_window, StreamMode::Stats)? {
+        StreamOutput::Stats(stats) => Ok(*stats),
+        StreamOutput::Full(_) => unreachable!("统计模式返回完整结果"),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StreamMode {
+    Full,
+    Stats,
+}
+
+enum StreamOutput {
+    Full(Box<BacktestResult>),
+    Stats(Box<BacktestStats>),
+}
+
+fn run_backtest_stream_with<F>(
+    input: &EngineInput,
+    strategy: &mut dyn Strategy,
+    mut next_window: F,
+    mode: StreamMode,
+) -> Result<StreamOutput>
 where
     F: FnMut() -> Result<Option<Universe>>,
 {
@@ -301,7 +368,14 @@ where
         }
         .into());
     }
-    engine.finish()
+    match mode {
+        StreamMode::Full => engine
+            .finish()
+            .map(|result| StreamOutput::Full(Box::new(result))),
+        StreamMode::Stats => engine
+            .finish_stats()
+            .map(|stats| StreamOutput::Stats(Box::new(stats))),
+    }
 }
 
 impl Engine<'_> {
@@ -397,7 +471,7 @@ impl Engine<'_> {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<BacktestResult> {
+    fn settle_pending_warnings(&mut self) {
         for (symbol, order) in self.pending.iter().enumerate() {
             if let Some(order) = order {
                 let what = match order.kind {
@@ -410,15 +484,33 @@ impl Engine<'_> {
                 ));
             }
         }
+    }
+
+    fn metric_input(&self) -> MetricInput<'_> {
         let ppy = self.universe.specs[0].effective_periods_per_year(self.universe.timeframe);
-        let metrics = compute_metrics(&MetricInput {
+        MetricInput {
             equity: &self.equity,
             trades: &self.trades,
             fills: &self.fills,
             initial_cash: self.input.initial_cash,
             periods_per_year: ppy,
             risk_free_rate: self.input.risk_free_rate,
-        });
+        }
+    }
+
+    fn finish_stats(mut self) -> Result<BacktestStats> {
+        self.settle_pending_warnings();
+        let (metrics, period_sharpe) = compute_metrics_with_period_sharpe(&self.metric_input());
+        Ok(BacktestStats {
+            metrics,
+            period_sharpe,
+            warnings: self.warnings,
+        })
+    }
+
+    fn finish(mut self) -> Result<BacktestResult> {
+        self.settle_pending_warnings();
+        let metrics = compute_metrics(&self.metric_input());
         let drawdowns = drawdown_episodes(&self.equity, self.input.initial_cash, 5);
         let monthly = monthly_returns(&self.equity, self.input.initial_cash);
         let funding = if self.universe.funding.is_empty() {
@@ -1529,6 +1621,30 @@ mod tests {
             self.emitted = true;
             vec!["策略告警:测试".into()]
         }
+    }
+
+    #[test]
+    fn stats_mode_matches_full_result() {
+        let bars = [
+            (100.0, 101.0, 99.0, 100.0, 1.0),
+            (100.0, 103.0, 100.0, 102.0, 1.0),
+            (102.0, 104.0, 101.0, 103.0, 1.0),
+            (103.0, 105.0, 102.0, 104.0, 1.0),
+        ];
+        let universe = universe_ohlcv(&bars);
+        let mut run_input = input();
+        run_input.end_index = universe.len();
+        let mut full = Scripted::new(&[(0, 0.5)]);
+        let result = run_backtest(&universe, &run_input, &mut full).expect("full");
+        let mut stats_strategy = Scripted::new(&[(0, 0.5)]);
+        let stats = run_backtest_stats(&universe, &run_input, &mut stats_strategy).expect("stats");
+        assert_eq!(
+            format!("{:?}", result.metrics),
+            format!("{:?}", stats.metrics)
+        );
+        let returns = crate::metrics::equity_returns(&result.equity, run_input.initial_cash);
+        assert_eq!(stats.period_sharpe, crate::metrics::period_sharpe(&returns));
+        assert_eq!(result.warnings, stats.warnings);
     }
 
     fn universe_ohlcv(bars: &[(f64, f64, f64, f64, f64)]) -> Universe {

@@ -5,7 +5,7 @@
 //! 都应得到相同结果。
 
 use backtest_core::config::RunConfig;
-use backtest_core::engine::run_backtest_stream;
+use backtest_core::engine::{BacktestStats, run_backtest_stream, run_backtest_stream_stats};
 use backtest_core::error::Result;
 use backtest_core::model::BacktestResult;
 use backtest_data::{
@@ -94,14 +94,43 @@ pub(crate) fn run_streaming(
     let options = load_options(config);
     let mut cursor = range.start;
     run_backtest_stream(&input, strategy.as_mut(), || {
-        if cursor >= range.end {
-            return Ok(None);
-        }
-        let end = cursor.saturating_add(chunk_bars.max(1)).min(range.end);
-        let window = load_window(plan, &options, cursor, end, history)?;
-        cursor = end;
-        Ok(Some(window))
+        next_stream_window(plan, &options, range, chunk_bars, history, &mut cursor)
     })
+}
+
+/// 分块回放,只保留指标与逐期 Sharpe。
+pub(crate) fn run_streaming_stats(
+    config: &RunConfig,
+    plan: &DataPlan,
+    threads: usize,
+    range: IndexRange,
+    chunk_bars: usize,
+) -> Result<BacktestStats> {
+    let mut strategy = build(&config.strategy, plan.symbol_count());
+    let history = strategy.history_bars();
+    let input = crate::sweep::engine_input(config, threads, range);
+    let options = load_options(config);
+    let mut cursor = range.start;
+    run_backtest_stream_stats(&input, strategy.as_mut(), || {
+        next_stream_window(plan, &options, range, chunk_bars, history, &mut cursor)
+    })
+}
+
+fn next_stream_window(
+    plan: &DataPlan,
+    options: &LoadOptions<'_>,
+    range: IndexRange,
+    chunk_bars: usize,
+    history: usize,
+    cursor: &mut usize,
+) -> Result<Option<backtest_core::model::Universe>> {
+    if *cursor >= range.end {
+        return Ok(None);
+    }
+    let end = (*cursor).saturating_add(chunk_bars.max(1)).min(range.end);
+    let window = load_window(plan, options, *cursor, end, history)?;
+    *cursor = end;
+    Ok(Some(window))
 }
 
 #[cfg(test)]
