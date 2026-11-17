@@ -249,3 +249,9 @@
 - M11-A:冒烟(`fixtures/s5_daily.csv`,16 组参数):关闭分析 schema 1.1;开启分析
   schema 1.2,`pbo=0.0`,16 个试验,252 个组合;1 线程与 2 线程
   `analysis_hash` 一致。
+- 2026-11-17:M11-D 验收,143 个 core 测试、fmt、clippy、cargo doc 与 release 构建通过。
+- M11-D:新增 `backtest-core::analysis::plateau`,计算二维目标值矩阵的平台得分、
+  best、robust 与孤立尖峰判定;`plateau_tolerance` 默认 0.10。
+- M11-D:`sweep` 启用分析时,基于 heatmap 的二维网格计算平台结果并写入
+  `analysis.plateau`;报告第 9 章新增“参数平台”子节。
+- M11-D:新增 `[analysis].plateau_tolerance`(正有限数);非正数配置被拒绝。

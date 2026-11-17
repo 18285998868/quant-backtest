@@ -1150,7 +1150,11 @@ fn robustness_section(
             any = true;
             pbo_block(html, analysis);
         }
-        if analysis.bootstrap.is_none() && analysis.pbo.is_none() {
+        if analysis.plateau.is_some() {
+            any = true;
+            plateau_block(html, analysis);
+        }
+        if analysis.bootstrap.is_none() && analysis.pbo.is_none() && analysis.plateau.is_none() {
             any = true;
             html.push_str("<div class=\"panel\"><h3>统计分析</h3><p class=\"muted\">分析已启用,但没有可用的结果。</p>");
             if !analysis.warnings.is_empty() {
@@ -1302,6 +1306,40 @@ fn pbo_block(html: &mut String, analysis: &AnalysisReport) {
     html.push_str(
         "<p class=\"note\">CSCV 假设时间块可交换;止损、共享账户和路径依赖策略只能近似。当前扫描使用样本内区段日收益,未包含样本外区段。</p>\n",
     );
+    html.push_str("</div>\n");
+}
+
+fn plateau_block(html: &mut String, analysis: &AnalysisReport) {
+    let Some(plateau) = analysis.plateau.as_ref() else {
+        return;
+    };
+    html.push_str("<div class=\"panel\"><h3>参数平台</h3>\n");
+    let _ = writeln!(
+        html,
+        "<p class=\"muted\">best 格点: x={}, y={}, 目标值 {}</p>",
+        plateau.best.x,
+        plateau.best.y,
+        num(Some(plateau.best.value), 4)
+    );
+    if let Some(robust) = &plateau.robust {
+        let _ = writeln!(
+            html,
+            "<p>稳健点: x={}, y={}, 目标值 {}</p>",
+            robust.x, robust.y, num(Some(robust.value), 4)
+        );
+    } else {
+        html.push_str("<p class=\"muted\">没有平台得分 >=0.75 的稳健点。</p>\n");
+    }
+    if plateau.isolated {
+        html.push_str("<p class=\"warn\">best 为孤立尖峰:平台得分低于 0.5。</p>\n");
+    }
+    if !plateau.warnings.is_empty() {
+        html.push_str("<ul>\n");
+        for warning in &plateau.warnings {
+            let _ = writeln!(html, "<li class=\"warn\">{}</li>", escape_html(warning));
+        }
+        html.push_str("</ul>\n");
+    }
     html.push_str("</div>\n");
 }
 
@@ -2016,6 +2054,38 @@ fn validate_analysis_json(value: &serde_json::Value) -> std::result::Result<(), 
         }
         Some(_) => return Err("analysis.pbo 必须是对象或 null".into()),
     }
+    match object.get("plateau") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Object(plateau)) => {
+            for key in ["best", "robust"] {
+                match plateau.get(key) {
+                    None => return Err(format!("analysis.plateau.{key} 缺失")),
+                    Some(serde_json::Value::Null) if key == "robust" => {}
+                    Some(serde_json::Value::Object(point)) => {
+                        for field in ["x", "y"] {
+                            if point.get(field).and_then(serde_json::Value::as_u64).is_none() {
+                                return Err(format!("analysis.plateau.{key}.{field} 必须是非负整数"));
+                            }
+                        }
+                        if !point.get("value").is_some_and(serde_json::Value::is_number) {
+                            return Err(format!("analysis.plateau.{key}.value 必须是数值"));
+                        }
+                    }
+                    _ => return Err(format!("analysis.plateau.{key} 必须是对象或 null")),
+                }
+            }
+            if !plateau.get("isolated").is_some_and(serde_json::Value::is_boolean) {
+                return Err("analysis.plateau.isolated 必须是布尔值".into());
+            }
+            if !plateau.get("scores").is_some_and(serde_json::Value::is_array) {
+                return Err("analysis.plateau.scores 必须是数组".into());
+            }
+            if !plateau.get("warnings").is_some_and(serde_json::Value::is_array) {
+                return Err("analysis.plateau.warnings 必须是数组".into());
+            }
+        }
+        Some(_) => return Err("analysis.plateau 必须是对象或 null".into()),
+    }
     Ok(())
 }
 
@@ -2157,6 +2227,7 @@ mod tests {
                 best_label: Some("fast=5".into()),
                 warnings: vec!["测试 PBO 警告".into()],
             }),
+            plateau: None,
             warnings: vec!["测试分析警告".into()],
         }
     }

@@ -1,7 +1,7 @@
 # 015 统计分析模块设计草案
 
 日期:2026-11-17
-状态:M11-C 与 M11-A 已实现并验收;M11-B/D/E 待推进
+状态:M11-C、M11-A 与 M11-D 已实现并验收;M11-B/E 待推进
 上游:[需求规格](../01-需求规格.md)、[调研与决策](../02-调研与决策.md)、[流程设计](../03-流程设计.md)
 相关:[014 多标的收盘价标记](./014-multi-symbol-marking.md)
 
@@ -570,6 +570,16 @@ M11-A 验收(2026-11-17):
   `analysis_hash` 一致;报告写出 PBO 子节与“CSCV 近似”注记。
 - `min_trials` 告警路径与 `pbo_blocks` 超过观测数的跳过路径均有单测覆盖。
 
+M11-D 验收(2026-11-17):
+
+- 143 个 core 测试(含 plateau 单测)、fmt、clippy、cargo doc 与 release 构建通过。
+- AC-M11-7 由 `plateau` 单测覆盖:平坦高值面所有格点得分 1.0 且 `isolated=false`;
+  孤立尖峰 `isolated=true`;稳健点选取得分 >=0.75 中目标值最大者。
+- 冒烟(`fixtures/s5_daily.csv`,16 组参数):开启分析时 `analysis.plateau` 非空,
+  报告写出“参数平台”子节,含 best/robust/isolated 与得分矩阵;`analysis_hash`
+  与 1 线程/2 线程一致。
+- `[analysis].plateau_tolerance` 默认 0.10,必须为正有限数;非正数配置被拒绝。
+
 PBO 的路径依赖夹具:
 
 - 用带止损的 SmaCross 生成收益,确认报告写出“CSCV 近似”告警。
@@ -627,7 +637,13 @@ M11-C 已于 2026-11-17 完成并验收;其余阶段未开始。
 - `crates/backtest-cli/src/sweep.rs` 的试验矩阵采集与 PBO 编排
 - `crates/backtest-report/src/lib.rs` 的 `pbo_block` 与 schema 校验
 
-未做:SPA、plateau、trial registry、`analyze` 子命令与收益矩阵持久化。
+代码位置(M11-D):
+
+- `crates/backtest-core/src/analysis/plateau.rs`
+- `crates/backtest-cli/src/sweep.rs` 的平台矩阵采集与 `analysis.plateau` 编排
+- `crates/backtest-report/src/lib.rs` 的 `plateau_block` 与 schema 校验
+
+未做:SPA、trial registry、`analyze` 子命令与收益矩阵持久化。
 
 ## 13.1 实现记录(M11-A)
 

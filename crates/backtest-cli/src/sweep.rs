@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use backtest_core::analysis::{AnalysisReport, SweepAnalysisInput, analyze_sweep};
+use backtest_core::analysis::{
+    AnalysisReport, PlateauInput, SweepAnalysisInput, analyze_sweep, plateau_score,
+};
 use backtest_core::config::{Objective, RunConfig};
 use backtest_core::engine::{BacktestStats, EngineInput, run_backtest, run_backtest_stats};
 use backtest_core::error::{ConfigError, Error, ReportError, Result};
@@ -486,7 +488,7 @@ pub(crate) fn execute(
         .filter(|task| task.objective_value.is_some())
         .map(|task| task.index);
 
-    let analysis = if config.analysis.enabled {
+    let mut analysis = if config.analysis.enabled {
         let mut labels = Vec::with_capacity(tasks.len());
         let mut rows = Vec::with_capacity(tasks.len());
         for task in &mut tasks {
@@ -609,6 +611,42 @@ pub(crate) fn execute(
 
     let marginals = build_marginals(&sweep.grid, &tasks);
     let heatmap = build_heatmap(&sweep.grid, &marginals, &tasks);
+
+    if let Some(analysis) = analysis.as_mut() {
+        if let Some(heatmap) = &heatmap {
+            let mut values = vec![vec![None; heatmap.x_values.len()]; heatmap.y_values.len()];
+            for (yi, y) in heatmap.y_values.iter().enumerate() {
+                for (xi, x) in heatmap.x_values.iter().enumerate() {
+                    let matching: Vec<&SweepTask> = tasks
+                        .iter()
+                        .filter(|task| {
+                            task.params.get(&heatmap.x_param) == Some(x)
+                                && task.params.get(&heatmap.y_param) == Some(y)
+                        })
+                        .collect();
+                    let vals: Vec<f64> =
+                        matching.iter().filter_map(|task| task.objective_value).collect();
+                    if !vals.is_empty() {
+                        values[yi][xi] = Some(vals.iter().sum::<f64>() / vals.len() as f64);
+                    }
+                }
+            }
+            match plateau_score(&PlateauInput {
+                values,
+                tolerance: config.analysis.plateau_tolerance,
+            }) {
+                Ok(computation) => {
+                    analysis.plateau = Some(computation.report);
+                }
+                Err(error) => {
+                    analysis.warnings.push(format!("平台分析跳过: {error}"));
+                }
+            }
+        } else {
+            analysis.warnings.push("平台分析需要至少两个参数轴,已跳过".into());
+        }
+    }
+
     let counts = SweepCounts {
         total: grid.total,
         valid: grid.len(),

@@ -519,7 +519,7 @@ pub struct RunConfig {
 }
 
 /// `[analysis]` 段。默认关闭。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnalysisConfig {
     pub enabled: bool,
     pub seed: u64,
@@ -528,6 +528,8 @@ pub struct AnalysisConfig {
     pub pbo_blocks: usize,
     /// PBO 的最小试验数,低于此值只告警。
     pub min_trials: usize,
+    /// 平台得分的目标值容差,按目标值量纲。
+    pub plateau_tolerance: f64,
 }
 
 impl Default for AnalysisConfig {
@@ -538,6 +540,7 @@ impl Default for AnalysisConfig {
             bootstrap_samples: default_bootstrap_samples(),
             pbo_blocks: default_pbo_blocks(),
             min_trials: default_min_trials(),
+            plateau_tolerance: default_plateau_tolerance(),
         }
     }
 }
@@ -778,6 +781,8 @@ struct RawAnalysis {
     pbo_blocks: usize,
     #[serde(default = "default_min_trials")]
     min_trials: usize,
+    #[serde(default = "default_plateau_tolerance")]
+    plateau_tolerance: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -820,6 +825,10 @@ fn default_pbo_blocks() -> usize {
 
 fn default_min_trials() -> usize {
     20
+}
+
+fn default_plateau_tolerance() -> f64 {
+    0.10
 }
 
 fn one() -> f64 {
@@ -1378,12 +1387,16 @@ fn parse_analysis(raw: Option<RawAnalysis>) -> Result<AnalysisConfig> {
     if raw.min_trials < 2 {
         return Err(field("analysis.min_trials", "必须 >= 2"));
     }
+    if !raw.plateau_tolerance.is_finite() || raw.plateau_tolerance <= 0.0 {
+        return Err(field("analysis.plateau_tolerance", "必须是正有限数"));
+    }
     Ok(AnalysisConfig {
         enabled: raw.enabled,
         seed: raw.seed,
         bootstrap_samples: raw.bootstrap_samples,
         pbo_blocks: raw.pbo_blocks,
         min_trials: raw.min_trials,
+        plateau_tolerance: raw.plateau_tolerance,
     })
 }
 

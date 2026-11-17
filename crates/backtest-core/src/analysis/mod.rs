@@ -7,6 +7,7 @@
 
 mod bootstrap;
 mod pbo;
+mod plateau;
 mod rng;
 
 pub use bootstrap::{
@@ -14,6 +15,7 @@ pub use bootstrap::{
     DEFAULT_CONFIDENCE, stationary_bootstrap,
 };
 pub use pbo::{PboComputation, PboInput, PboReport, probability_of_backtest_overfitting};
+pub use plateau::{GridPoint, PlateauComputation, PlateauInput, PlateauReport, plateau_score};
 pub use rng::{SplitMix64, seed_for};
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,9 @@ pub struct AnalysisReport {
     /// PBO/CSCV 结果;`run` 不计算,扫描启用分析时才有。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pbo: Option<PboReport>,
+    /// 参数平台结果;仅 sweep 且至少两个参数轴时计算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plateau: Option<PlateauReport>,
     pub warnings: Vec<String>,
 }
 
@@ -66,6 +71,7 @@ pub fn analyze_run(input: &RunAnalysisInput<'_>) -> Result<AnalysisReport> {
         input_hash: input_hash(input.returns, input.periods_per_year),
         bootstrap: Some(computation.report),
         pbo: None,
+        plateau: None,
         warnings: computation.warnings,
     };
     finalize(report)
@@ -170,6 +176,7 @@ pub fn analyze_sweep(input: &SweepAnalysisInput<'_>) -> Result<AnalysisReport> {
         input_hash: matrix_input_hash(&labels, &rows, input.periods_per_year),
         bootstrap: None,
         pbo,
+        plateau: None,
         warnings,
     };
     finalize(report)
@@ -191,6 +198,13 @@ fn content_hash(report: &AnalysisReport) -> Result<String> {
         payload.insert(
             "pbo".into(),
             serde_json::to_value(pbo)
+                .map_err(|error| AnalysisError::Serialize(error.to_string()))?,
+        );
+    }
+    if let Some(plateau) = &report.plateau {
+        payload.insert(
+            "plateau".into(),
+            serde_json::to_value(plateau)
                 .map_err(|error| AnalysisError::Serialize(error.to_string()))?,
         );
     }
