@@ -1167,7 +1167,11 @@ fn robustness_section(
             any = true;
             plateau_block(html, analysis);
         }
-        if analysis.bootstrap.is_none() && analysis.pbo.is_none() && analysis.plateau.is_none() {
+        if analysis.spa.is_some() {
+            any = true;
+            spa_block(html, analysis);
+        }
+        if analysis.bootstrap.is_none() && analysis.pbo.is_none() && analysis.plateau.is_none() && analysis.spa.is_none() {
             any = true;
             html.push_str("<div class=\"panel\"><h3>统计分析</h3><p class=\"muted\">分析已启用,但没有可用的结果。</p>");
             if !analysis.warnings.is_empty() {
@@ -1349,6 +1353,41 @@ fn plateau_block(html: &mut String, analysis: &AnalysisReport) {
     if !plateau.warnings.is_empty() {
         html.push_str("<ul>\n");
         for warning in &plateau.warnings {
+            let _ = writeln!(html, "<li class=\"warn\">{}</li>", escape_html(warning));
+        }
+        html.push_str("</ul>\n");
+    }
+    html.push_str("</div>\n");
+}
+
+fn spa_block(html: &mut String, analysis: &AnalysisReport) {
+    let Some(spa) = analysis.spa.as_ref() else {
+        return;
+    };
+    html.push_str("<div class=\"panel\"><h3>SPA / Reality Check</h3>\n");
+    let _ = writeln!(
+        html,
+        "<p class=\"muted\">variant: {} · 块长 {} · 样本 {} · 试验 {}</p>",
+        escape_html(&spa.variant),
+        spa.block_length,
+        spa.samples,
+        spa.trials
+    );
+    let _ = writeln!(
+        html,
+        "<p><span class=\"num\">p = {:.4}</span> · 统计量 {:.3} · 最优试验 {}</p>",
+        spa.p_value,
+        spa.statistic,
+        spa.best_label.as_deref().map(escape_html).unwrap_or_else(|| "无".into())
+    );
+    let _ = writeln!(
+        html,
+        "<p class=\"muted\">基准: {}</p>",
+        escape_html(&spa.benchmark)
+    );
+    if !spa.warnings.is_empty() {
+        html.push_str("<ul>\n");
+        for warning in &spa.warnings {
             let _ = writeln!(html, "<li class=\"warn\">{}</li>", escape_html(warning));
         }
         html.push_str("</ul>\n");
@@ -2099,6 +2138,32 @@ fn validate_analysis_json(value: &serde_json::Value) -> std::result::Result<(), 
         }
         Some(_) => return Err("analysis.plateau 必须是对象或 null".into()),
     }
+    match object.get("spa") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Object(spa)) => {
+            for key in ["p_value", "statistic"] {
+                if !spa.get(key).is_some_and(serde_json::Value::is_number) {
+                    return Err(format!("analysis.spa.{key} 必须是数值"));
+                }
+            }
+            for key in ["trials", "samples", "block_length"] {
+                if spa.get(key).and_then(serde_json::Value::as_u64).is_none() {
+                    return Err(format!("analysis.spa.{key} 必须是非负整数"));
+                }
+            }
+            match spa.get("best_label") {
+                Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {}
+                _ => return Err("analysis.spa.best_label 必须是字符串或 null".into()),
+            }
+            if !spa.get("variant").is_some_and(serde_json::Value::is_string) {
+                return Err("analysis.spa.variant 必须是字符串".into());
+            }
+            if !spa.get("warnings").is_some_and(serde_json::Value::is_array) {
+                return Err("analysis.spa.warnings 必须是数组".into());
+            }
+        }
+        Some(_) => return Err("analysis.spa 必须是对象或 null".into()),
+    }
     Ok(())
 }
 
@@ -2241,6 +2306,7 @@ mod tests {
                 warnings: vec!["测试 PBO 警告".into()],
             }),
             plateau: None,
+            spa: None,
             warnings: vec!["测试分析警告".into()],
         }
     }

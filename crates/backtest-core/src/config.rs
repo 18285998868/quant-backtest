@@ -519,7 +519,7 @@ pub struct RunConfig {
 }
 
 /// `[analysis]` 段。默认关闭。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AnalysisConfig {
     pub enabled: bool,
     pub seed: u64,
@@ -530,6 +530,12 @@ pub struct AnalysisConfig {
     pub min_trials: usize,
     /// 平台得分的目标值容差,按目标值量纲。
     pub plateau_tolerance: f64,
+    /// SPA 基准 CSV 路径;未提供时跳过 SPA。
+    pub benchmark: Option<String>,
+    /// SPA bootstrap 次数。
+    pub spa_samples: usize,
+    /// SPA 块长;0 表示自动 round(T^(1/3))。
+    pub spa_block_length: usize,
 }
 
 impl Default for AnalysisConfig {
@@ -541,6 +547,9 @@ impl Default for AnalysisConfig {
             pbo_blocks: default_pbo_blocks(),
             min_trials: default_min_trials(),
             plateau_tolerance: default_plateau_tolerance(),
+            benchmark: None,
+            spa_samples: default_spa_samples(),
+            spa_block_length: 0,
         }
     }
 }
@@ -783,6 +792,12 @@ struct RawAnalysis {
     min_trials: usize,
     #[serde(default = "default_plateau_tolerance")]
     plateau_tolerance: f64,
+    #[serde(default)]
+    benchmark: Option<String>,
+    #[serde(default = "default_spa_samples")]
+    spa_samples: usize,
+    #[serde(default)]
+    spa_block_length: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -829,6 +844,10 @@ fn default_min_trials() -> usize {
 
 fn default_plateau_tolerance() -> f64 {
     0.10
+}
+
+fn default_spa_samples() -> usize {
+    1_000
 }
 
 fn one() -> f64 {
@@ -1390,6 +1409,14 @@ fn parse_analysis(raw: Option<RawAnalysis>) -> Result<AnalysisConfig> {
     if !raw.plateau_tolerance.is_finite() || raw.plateau_tolerance <= 0.0 {
         return Err(field("analysis.plateau_tolerance", "必须是正有限数"));
     }
+    if !(100..=10_000).contains(&raw.spa_samples) {
+        return Err(field("analysis.spa_samples", "必须在 [100, 10000] 区间内"));
+    }
+    if let Some(path) = &raw.benchmark
+        && path.trim().is_empty()
+    {
+        return Err(field("analysis.benchmark", "路径不能为空"));
+    }
     Ok(AnalysisConfig {
         enabled: raw.enabled,
         seed: raw.seed,
@@ -1397,6 +1424,9 @@ fn parse_analysis(raw: Option<RawAnalysis>) -> Result<AnalysisConfig> {
         pbo_blocks: raw.pbo_blocks,
         min_trials: raw.min_trials,
         plateau_tolerance: raw.plateau_tolerance,
+        benchmark: raw.benchmark,
+        spa_samples: raw.spa_samples,
+        spa_block_length: raw.spa_block_length,
     })
 }
 

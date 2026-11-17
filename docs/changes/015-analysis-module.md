@@ -1,7 +1,7 @@
 # 015 统计分析模块设计草案
 
 日期:2026-11-17
-状态:M11-C、M11-A、M11-D 与 M11-E 已实现并验收;M11-B 待推进
+状态:M11-C、M11-A、M11-D、M11-E 与 M11-B 已实现并验收
 上游:[需求规格](../01-需求规格.md)、[调研与决策](../02-调研与决策.md)、[流程设计](../03-流程设计.md)
 相关:[014 多标的收盘价标记](./014-multi-symbol-marking.md)
 
@@ -589,6 +589,15 @@ M11-E 验收(2026-11-17):
   JSON SHA-256,与线程数无关。
 - `sweep_hash` 不吸收 `trial_registry`,历史哈希保持不变。
 
+M11-B 验收(2026-11-17):
+
+- 146 个 core 测试、fmt、clippy、cargo doc 与 release 构建通过。
+- AC-M11-5/6 由 `spa` 单测覆盖:全部试验等于基准时 p>0.5;加入真实边缘时 p<0.5
+  且 `best_label` 指向该试验。
+- 冒烟(`fixtures/s5_daily.csv`,16 组参数,基准 `/tmp/bench.csv`):开启分析时
+  `analysis.spa` 非空,`p=0.119`,报告写出 SPA 子节;p 与 1/2 线程一致。
+- `[analysis].benchmark` 提供 CSV 路径;缺失时 SPA 跳过并告警,不冒充基准。
+
 PBO 的路径依赖夹具:
 
 - 用带止损的 SmaCross 生成收益,确认报告写出“CSCV 近似”告警。
@@ -657,7 +666,13 @@ M11-C 已于 2026-11-17 完成并验收;其余阶段未开始。
 - `crates/backtest-cli/src/sweep.rs` 的 `trial_registry` 编排与 `trial_hash`
 - `crates/backtest-report/src/lib.rs` 的 `TrialRegistry` 与 schema 校验
 
-未做:SPA、`analyze` 子命令与收益矩阵持久化。
+代码位置(M11-B):
+
+- `crates/backtest-core/src/analysis/spa.rs`
+- `crates/backtest-cli/src/sweep.rs` 的基准加载与 `analysis.spa` 编排
+- `crates/backtest-report/src/lib.rs` 的 `spa_block` 与 schema 校验
+
+未做:`analyze` 子命令与收益矩阵持久化。
 
 ## 13.1 实现记录(M11-A)
 

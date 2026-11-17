@@ -9,6 +9,7 @@ mod bootstrap;
 mod pbo;
 mod plateau;
 mod rng;
+mod spa;
 
 pub use bootstrap::{
     BootstrapComputation, BootstrapInput, BootstrapReport, BootstrapStat, BootstrapStatistic,
@@ -16,6 +17,7 @@ pub use bootstrap::{
 };
 pub use pbo::{PboComputation, PboInput, PboReport, probability_of_backtest_overfitting};
 pub use plateau::{GridPoint, PlateauComputation, PlateauInput, PlateauReport, plateau_score};
+pub use spa::{SpaComputation, SpaInput, SpaReport, spa_test};
 pub use rng::{SplitMix64, seed_for};
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +44,9 @@ pub struct AnalysisReport {
     /// 参数平台结果;仅 sweep 且至少两个参数轴时计算。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plateau: Option<PlateauReport>,
+    /// SPA 结果;提供 benchmark 时计算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spa: Option<SpaReport>,
     pub warnings: Vec<String>,
 }
 
@@ -72,6 +77,7 @@ pub fn analyze_run(input: &RunAnalysisInput<'_>) -> Result<AnalysisReport> {
         bootstrap: Some(computation.report),
         pbo: None,
         plateau: None,
+        spa: None,
         warnings: computation.warnings,
     };
     finalize(report)
@@ -177,6 +183,7 @@ pub fn analyze_sweep(input: &SweepAnalysisInput<'_>) -> Result<AnalysisReport> {
         bootstrap: None,
         pbo,
         plateau: None,
+        spa: None,
         warnings,
     };
     finalize(report)
@@ -205,6 +212,13 @@ fn content_hash(report: &AnalysisReport) -> Result<String> {
         payload.insert(
             "plateau".into(),
             serde_json::to_value(plateau)
+                .map_err(|error| AnalysisError::Serialize(error.to_string()))?,
+        );
+    }
+    if let Some(spa) = &report.spa {
+        payload.insert(
+            "spa".into(),
+            serde_json::to_value(spa)
                 .map_err(|error| AnalysisError::Serialize(error.to_string()))?,
         );
     }

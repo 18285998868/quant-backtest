@@ -7,7 +7,8 @@ use std::time::Instant;
 use sha2::{Digest, Sha256};
 
 use backtest_core::analysis::{
-    AnalysisReport, PlateauInput, SweepAnalysisInput, analyze_sweep, plateau_score,
+    AnalysisReport, PlateauInput, SpaInput, SweepAnalysisInput, analyze_sweep, plateau_score,
+    spa_test,
 };
 use backtest_core::config::{Objective, RunConfig};
 use backtest_core::engine::{BacktestStats, EngineInput, run_backtest, run_backtest_stats};
@@ -503,14 +504,55 @@ pub(crate) fn execute(
                 rows.push(row);
             }
         }
-        Some(analyze_sweep(&SweepAnalysisInput {
+        let mut report = analyze_sweep(&SweepAnalysisInput {
             labels: &labels,
             returns: &rows,
             periods_per_year: config.periods_per_year(),
             seed: config.analysis.seed,
             pbo_blocks: config.analysis.pbo_blocks,
             min_trials: config.analysis.min_trials,
-        })?)
+        })?;
+
+        // SPA
+        if let Some(path) = &config.analysis.benchmark {
+            match load_benchmark_returns(path) {
+                Ok(benchmark) => {
+                    let t = rows.iter().map(|r| r.len()).min().unwrap_or(0).min(benchmark.len());
+                    if t < 2 {
+                        report.warnings.push("SPA 基准与试验收益长度不足,已跳过".into());
+                    } else {
+                        let trimmed_rows: Vec<Vec<f64>> =
+                            rows.iter().map(|r| r[..t].to_vec()).collect();
+                        let trimmed_bench = benchmark[..t].to_vec();
+                        match spa_test(&SpaInput {
+                            labels: &labels,
+                            returns: &trimmed_rows,
+                            benchmark: &trimmed_bench,
+                            samples: config.analysis.spa_samples,
+                            block_length: config.analysis.spa_block_length,
+                            seed: config.analysis.seed,
+                            min_trials: config.analysis.min_trials,
+                        }) {
+                            Ok(computation) => {
+                                let mut spa_report = computation.report;
+                                spa_report.benchmark = path.clone();
+                                report.spa = Some(spa_report);
+                            }
+                            Err(error) => {
+                                report.warnings.push(format!("SPA 跳过: {error}"));
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    report.warnings.push(format!("SPA 基准加载失败,已跳过: {error}"));
+                }
+            }
+        } else {
+            report.warnings.push("未提供 [analysis].benchmark,已跳过 SPA".into());
+        }
+
+        Some(report)
     } else {
         None
     };
@@ -773,6 +815,57 @@ fn param_label(params: &BTreeMap<String, Value>) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+
+fn load_benchmark_returns(path: &str) -> Result<Vec<f64>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| ConfigError::Invalid {
+            field: "analysis.benchmark".into(),
+            message: format!("无法读取基准文件 {path}: {error}"),
+        })?;
+    let mut closes = Vec::new();
+    for (line_no, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line_no == 0 && line.to_lowercase().contains("close") {
+            continue;
+        }
+        let columns: Vec<&str> = line.split(',').collect();
+        // 期望最后一列为收盘价,或存在名为 close 的列
+        let close_str = if columns.len() >= 2 {
+            columns[columns.len() - 1]
+        } else {
+            return Err(ConfigError::Invalid {
+                field: "analysis.benchmark".into(),
+                message: "基准 CSV 至少需要 2 列".into(),
+            }
+            .into());
+        };
+        let close: f64 = close_str.trim().parse().map_err(|_| ConfigError::Invalid {
+            field: "analysis.benchmark".into(),
+            message: format!("第 {} 行收盘价无效: {close_str}", line_no + 1),
+        })?;
+        closes.push(close);
+    }
+    if closes.len() < 2 {
+        return Err(ConfigError::Invalid {
+            field: "analysis.benchmark".into(),
+            message: "基准序列至少需要 2 个价格".into(),
+        }
+        .into());
+    }
+    let mut returns = Vec::with_capacity(closes.len() - 1);
+    for pair in closes.windows(2) {
+        if pair[0] != 0.0 {
+            returns.push(pair[1] / pair[0] - 1.0);
+        } else {
+            returns.push(0.0);
+        }
+    }
+    Ok(returns)
 }
 
 fn build_marginals(grid: &BTreeMap<String, Vec<Value>>, tasks: &[SweepTask]) -> Vec<ParamMarginal> {

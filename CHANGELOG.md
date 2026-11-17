@@ -259,3 +259,9 @@
 - M11-E:新增 `TrialRegistry`,记录 `grid_total`/`grid_valid`/`skipped_invalid`/
   `oos_evaluated`/`analysis_trials` 与 `trial_hash`;写入 `sweep_summary.json`
   与报告 JSON;`sweep_hash` 不吸收该字段。
+- 2026-11-17:M11-B 验收,146 个 core 测试、fmt、clippy、cargo doc 与 release 构建通过。
+- M11-B:新增 `backtest-core::analysis::spa`,实现 studentized stationary bootstrap
+  SPA,输出 p 值、统计量、最优试验、块长与样本数。
+- M11-B:新增 `[analysis].benchmark`(CSV 路径)、`spa_samples`、`spa_block_length`;
+  `sweep` 启用分析时加载基准并计算 SPA,未提供基准时跳过并告警。
+- M11-B:报告第 9 章新增 SPA 子节,`validate_report_json` 校验 `analysis.spa`。
